@@ -1,6 +1,6 @@
 # PDF Lite
 
-A lightweight, Acrobat-style PDF reader and editor for Windows, written in Python with
+A free, open-source, lightweight, Acrobat-style PDF reader and editor for Windows, written in Python with
 Tkinter and PyMuPDF. It opens ordinary PDFs without a browser or Electron
 runtime, and adds interactive editing and writing workflows:
 
@@ -239,7 +239,7 @@ This builds a standalone binary at [`dist/PDF Lite.exe`](file:///C:/Users/kenhu/
 
 ## Windows Installer (.msi) packaging
 
-To distribute and sell PDF Lite commercially, compile the Windows Installer (`.msi`) package using the bundled WiX 3.11 toolchain:
+To package PDF Lite as a standalone Windows Installer (`.msi`), compile using the bundled WiX 3.11 toolchain:
 
 ```bat
 build_msi.bat
@@ -252,3 +252,21 @@ The build script compiles [`installer/Product.wxs`](file:///C:/Users/kenhu/pdf-r
 - **Windows File Association & Default Apps**: Registers the `PDFLite.Document` ProgId, `.pdf` extension, and application capabilities under `HKCU\Software\RegisteredApplications` and `OpenWithProgids` for seamless Windows 10/11 **Default Apps** integration.
 - **Standard Setup Wizard**: Includes an End-User License Agreement ([`installer/license.rtf`](file:///C:/Users/kenhu/pdf-reader-lite/installer/license.rtf)), installation folder selection, progress display, and an optional "Launch PDF Lite now" checkbox on exit.
 - **Clean Uninstallation**: Fully integrated with Windows **Settings > Apps > Installed apps** and Add/Remove Programs with proper application metadata, icon, publisher details (`Ken Huang`), and complete file/shortcut/registry cleanup on uninstall.
+
+## Open Source License & Liability Waiver
+
+PDF Lite is free and open-source software distributed under the MIT License.
+
+### Liability Waiver and Disclaimer of Damages
+
+By downloading, installing, running, modifying, compiling, distributing, or otherwise using this software, tool, scripts, installer, or source code, you expressly agree to the following terms and waivers:
+
+1. **Complete Waiver and Release of Liability**: You agree to waive, release, discharge, and hold harmless the developer (Ken Huang), contributors, GitHub, Inc., and any individuals or entities associated with the development, implementation, distribution, maintenance, or hosting of this tool and its repository from any and all claims, demands, liabilities, lawsuits, arbitrations, losses, damages, injuries, costs, or expenses (including legal fees) of any kind or nature.
+2. **"As-Is" Provision Without Warranty**: This software is provided strictly on an **"AS IS"** and **"AS AVAILABLE"** basis, without warranty of any kind, either express or implied, including but not limited to the implied warranties of merchantability, fitness for a particular purpose, non-infringement, course of performance, uninterrupted availability, or accuracy of rendered or converted output.
+3. **Total Exclusion of Consequential Damages**: Under no legal or equitable theory—whether in contract, tort (including negligence), strict liability, breach of statutory duty, or otherwise—shall the developer, GitHub, Inc., or any associated parties be liable for any direct, indirect, incidental, special, consequential, exemplary, or punitive damages. This exclusion encompasses, without limitation:
+   - Loss of data, corrupted documents, or unrecoverable files;
+   - Hardware malfunctions, operating system instability, or software conflicts;
+   - Business interruption, loss of profits, commercial damages, or lost revenue;
+   - Any consequences arising from the modification, signing, or conversion of legal, financial, or sensitive documents.
+4. **User Assumption of Risk**: The user assumes complete, sole responsibility and risk for testing, verifying, and evaluating the functionality, accuracy, and security of PDF Lite and all output documents. Users must maintain independent, unedited backups of all documents prior to processing.
+5. **No Official Affiliation**: PDF Lite is an independent, offline open-source project and is not affiliated with, endorsed by, or sponsored by Adobe Inc. or Microsoft Corporation.
