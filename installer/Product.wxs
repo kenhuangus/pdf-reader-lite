@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="PDF Lite"
+           Language="1033"
+           Version="1.0.0"
+           Manufacturer="Ken Huang"
+           UpgradeCode="4C6F4B72-73A1-428E-B9D1-34F90D90A1A2">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             Platform="x64"
+             Description="PDF Lite Installer"
+             Comments="Fast, private Acrobat-style PDF reader and editor for Windows." />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Application Icons and ARP Properties -->
+    <Icon Id="AppIcon" SourceFile="..\assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/kenhuangus" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/kenhuangus" />
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+
+    <!-- Dual-Purpose Package Authoring (Defaults to per-user, supports per-machine with ALLUSERS=1) -->
+    <Property Id="ALLUSERS" Value="2" />
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+
+    <!-- Directory Layout: Per-user AppData\Local\Programs\PDF Lite -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="PDF Lite">
+            <Directory Id="AssetsFolder" Name="assets" />
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <!-- Start Menu Programs Folder -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="PDF Lite" />
+      </Directory>
+
+      <!-- Desktop Folder -->
+      <Directory Id="DesktopFolder" Name="Desktop" />
+    </Directory>
+
+    <!-- Components -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="E32D4B63-631A-4C2E-82C3-A3B7B342C101" Win64="yes">
+        <File Id="PDFLiteExe" Source="..\dist\PDF Lite.exe" KeyPath="yes">
+          <!-- Desktop Shortcut -->
+          <Shortcut Id="DesktopShortcut"
+                    Directory="DesktopFolder"
+                    Name="PDF Lite"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="AppIcon"
+                    Advertise="yes" />
+        </File>
+
+        <!-- File Association for .pdf in HKCU -->
+        <ProgId Id="PDFLite.Document" Description="PDF Lite Document" Icon="PDFLiteExe" IconIndex="0">
+          <Extension Id="pdf" ContentType="application/pdf">
+            <Verb Id="open" Command="Open with PDF Lite" TargetFile="PDFLiteExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+      </Component>
+
+      <Component Id="Documentation" Guid="F14A5C72-823B-4D1E-93B4-B5C8D453E202" Win64="yes">
+        <File Id="ReadmeFile" Source="..\README.md" KeyPath="yes" />
+        <File Id="SamplePdf" Source="..\sample.pdf" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Assets Directory Component -->
+    <DirectoryRef Id="AssetsFolder">
+      <Component Id="AssetsComponent" Guid="A25B6D83-934C-4E2F-A4C5-C6D9E564F303" Win64="yes">
+        <File Id="AssetIcon" Source="..\assets\icon.ico" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Start Menu Shortcut Component -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="B36C7E94-A45D-4F3A-B5D6-D7EAF675A404">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="PDF Lite"
+                  Description="Lightweight Acrobat-style PDF reader and editor"
+                  Target="[#PDFLiteExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\KenHuang\PDFLite" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Windows Default Apps and Open With Registry Registration -->
+    <DirectoryRef Id="TARGETDIR">
+      <Component Id="RegistryRegistration" Guid="C47D8FA5-B56E-404B-C6E7-E8FBA786B505" Win64="yes">
+        <!-- Application Capabilities for Windows 10/11 Default Apps (Per-User HKCU) -->
+        <RegistryKey Root="HKCU" Key="Software\PDF Lite\Capabilities">
+          <RegistryValue Type="string" Name="ApplicationName" Value="PDF Lite" />
+          <RegistryValue Type="string" Name="ApplicationDescription" Value="High-performance lightweight PDF reader and editor" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\PDF Lite\Capabilities\FileAssociations">
+          <RegistryValue Type="string" Name=".pdf" Value="PDFLite.Document" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\RegisteredApplications">
+          <RegistryValue Type="string" Name="PDF Lite" Value="Software\PDF Lite\Capabilities" />
+        </RegistryKey>
+
+        <!-- Open With Registry Handler in HKCU -->
+        <RegistryKey Root="HKCU" Key="Software\Classes\Applications\PDF Lite.exe\SupportedTypes">
+          <RegistryValue Type="string" Name=".pdf" Value="" />
+        </RegistryKey>
+        <RegistryKey Root="HKCU" Key="Software\Classes\Applications\PDF Lite.exe\shell\open\command">
+          <RegistryValue Type="string" Value="&quot;[#PDFLiteExe]&quot; &quot;%1&quot;" />
+        </RegistryKey>
+        <RegistryValue Root="HKCU" Key="Software\Classes\Applications\PDF Lite.exe" Type="string" Name="FriendlyAppName" Value="PDF Lite" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Feature Definitions -->
+    <Feature Id="Complete" Title="PDF Lite Application" Level="1" Display="expand" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="Documentation" />
+      <ComponentRef Id="AssetsComponent" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="RegistryRegistration" />
+    </Feature>
+
+    <!-- WiX UI Setup -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <!-- Optional Launch on Exit -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch PDF Lite now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#PDFLiteExe]" />
+    <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+    </UI>
+  </Product>
+</Wix>

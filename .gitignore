@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv_build/
+env/
+venv/
+ENV/
+
+# PyInstaller build intermediates
+build/
+
+# WiX toolset & intermediates
+*.wixobj
+*.wixpdb
+tools/
+
+# Temporary work & test files
+*.tmp
+*.log
+pdflite_placeholder.tmp
+smoke*.png
+_ink_render.png
+_layout_test.docx
+_native_test.docx
+_lo_test/
+
+# Secrets & credentials (defense-in-depth)
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+credentials.json
+secrets.json
+
+# Operating System & Editor artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
