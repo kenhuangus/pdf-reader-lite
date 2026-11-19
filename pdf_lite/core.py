@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import os
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -22,6 +23,51 @@ SCREEN_DPI = 96.0
 BASE_SCALE = SCREEN_DPI / PDF_POINTS_PER_INCH  # 100% zoom = 96 px per PDF inch
 
 ROTATE_CW = {0: 0, 90: -90, 180: 180, 270: 90}
+
+INK_SIGNATURE_BORDER_WIDTH = 1.8
+INK_SIGNATURE_STROKE_COLOR = (0.08, 0.18, 0.32)
+
+
+def build_signature_strokes_from_template(
+    template_strokes: list[list[tuple[float, float]]],
+    start_x: float,
+    start_y: float,
+    width: float,
+    height: float,
+) -> list[list[tuple[float, float]]]:
+    """Map pad-normalized stroke coordinates onto a PDF page box."""
+    pdf_strokes: list[list[tuple[float, float]]] = []
+    for stroke in template_strokes:
+        converted = [
+            (start_x + px * width, start_y + py * height)
+            for px, py in stroke
+        ]
+        if len(converted) >= 2:
+            pdf_strokes.append(converted)
+    return pdf_strokes
+
+
+def signature_layout_from_vertices(
+    vertices: list[list[tuple[float, float]]],
+) -> tuple[float, float, float, float]:
+    xs = [p[0] for poly in vertices for p in poly]
+    ys = [p[1] for poly in vertices for p in poly]
+    if not xs:
+        raise ValueError("The signature has no vertices")
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    return x0, y0, max(x1 - x0, 1.0), max(y1 - y0, 1.0)
+
+
+def signature_template_from_vertices(
+    vertices: list[list[tuple[float, float]]],
+) -> tuple[list[list[tuple[float, float]]], float, float, float, float]:
+    """Recover normalized template strokes and anchor box from ink annotation vertices."""
+    x0, y0, width, height = signature_layout_from_vertices(vertices)
+    template = [
+        [((px - x0) / width, (py - y0) / height) for px, py in poly]
+        for poly in vertices
+    ]
+    return template, x0, y0, width, height
 
 
 class PasswordRequired(Exception):
@@ -176,12 +222,8 @@ class PdfDocument:
             image = image.rotate(angle, expand=True)
         return image
 
-    def add_ink_signature(self, number: int, strokes: list[list[tuple[float, float]]]) -> None:
-        """Add a hand-drawn ink annotation to a page.
-
-        strokes is a list of polylines in PDF page coordinates.  The returned
-        annotation is visible and remains editable in PDF viewers.
-        """
+    def add_ink_signature(self, number: int, strokes: list[list[tuple[float, float]]]) -> int:
+        """Add a hand-drawn ink annotation to a page; returns the annotation xref."""
         if not strokes:
             raise ValueError("The signature has no strokes")
         for poly in strokes:
@@ -189,9 +231,74 @@ class PdfDocument:
                 if not (math.isfinite(pt[0]) and math.isfinite(pt[1])):
                     raise ValueError("Stroke coordinates must be finite numbers")
         annot = self._doc[number].add_ink_annot(strokes)
-        annot.set_border(width=1.8)
-        annot.set_colors(stroke=(0.08, 0.18, 0.32))
+        annot.set_border(width=INK_SIGNATURE_BORDER_WIDTH)
+        annot.set_colors(stroke=INK_SIGNATURE_STROKE_COLOR)
         annot.update()
+        self.invalidate_page_cache(number)
+        return annot.xref
+
+    def _ink_annot_by_xref(self, number: int, xref: int) -> fitz.Annot | None:
+        for annot in self._doc[number].annots() or ():
+            if annot.xref != xref or annot.type[0] != fitz.PDF_ANNOT_INK:
+                continue
+            try:
+                annot.vertices
+            except RuntimeError:
+                continue
+            return annot
+        return None
+
+    def ink_signature_vertices(self, number: int, xref: int) -> list[list[tuple[float, float]]]:
+        for annot in self._doc[number].annots() or ():
+            if annot.xref != xref or annot.type[0] != fitz.PDF_ANNOT_INK:
+                continue
+            try:
+                return [list(map(tuple, poly)) for poly in annot.vertices]
+            except RuntimeError:
+                continue
+        raise ValueError("Signature not found")
+
+    def ink_signature_at_point(
+        self,
+        number: int,
+        point: tuple[float, float],
+        padding: float = 8.0,
+    ) -> int | None:
+        px, py = point
+        if not (math.isfinite(px) and math.isfinite(py)):
+            return None
+        for annot in self._doc[number].annots() or ():
+            if annot.type[0] != fitz.PDF_ANNOT_INK:
+                continue
+            rect = annot.rect
+            if (rect.x0 - padding <= px <= rect.x1 + padding
+                    and rect.y0 - padding <= py <= rect.y1 + padding):
+                return annot.xref
+        return None
+
+    def replace_ink_signature(
+        self,
+        number: int,
+        xref: int,
+        strokes: list[list[tuple[float, float]]],
+    ) -> int:
+        """Replace an existing ink signature annotation; returns the new xref."""
+        if not strokes:
+            raise ValueError("The signature has no strokes")
+        page = self._doc[number]
+        target = self._ink_annot_by_xref(number, xref)
+        if target is None:
+            raise ValueError("Signature not found")
+        page.delete_annot(target)
+        del target
+        fresh = page.add_ink_annot(strokes)
+        fresh.set_border(width=INK_SIGNATURE_BORDER_WIDTH)
+        fresh.set_colors(stroke=INK_SIGNATURE_STROKE_COLOR)
+        fresh.update()
+        new_xref = fresh.xref
+        del fresh
+        self.invalidate_page_cache(number)
+        return new_xref
 
     def invalidate_page_cache(self, number: int) -> None:
         """Clear cached words, extracted text, and links for a modified page."""
@@ -218,6 +325,11 @@ class PdfDocument:
             try:
                 self._doc.save(tmp_path, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
                 self._doc.close()
+                self._doc = None
+                try:
+                    os.chmod(orig_path, stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
                 os.replace(tmp_path, orig_path)
                 self._doc = fitz.open(orig_path)
                 if self.password:

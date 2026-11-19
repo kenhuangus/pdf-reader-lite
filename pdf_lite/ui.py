@@ -892,6 +892,11 @@ class PDFLiteApp(tk.Tk):
         self.doc.path = saved_path
         self.path = saved_path
         self.modified = False
+        self.view.finish_signature_adjust(silent=True)
+        if self.doc is not None:
+            for page in range(self.doc.page_count):
+                self.view._invalidate_page(page)
+                self.thumbnails.invalidate_page(page)
         self._refresh_title()
         self._add_recent(saved_path)
         self._refresh_status()
@@ -2070,6 +2075,8 @@ class PDFLiteApp(tk.Tk):
     def _on_escape(self, _event=None) -> None:
         if self.view._placing_signature:
             self.view.cancel_signature_placement()
+        elif self.view._signature_adjust is not None:
+            self.view.finish_signature_adjust()
         elif self._fullscreen:
             self.toggle_fullscreen()
         elif self.searchbar.winfo_ismapped():

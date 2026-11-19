@@ -1,6 +1,7 @@
 """Tests for PDF editing routines: text, images, tables, and saving."""
 
 import os
+import stat
 import tempfile
 import unittest
 
@@ -8,7 +9,12 @@ import fitz
 from PIL import Image
 
 from pdf_lite.convert import convert_reflow
-from pdf_lite.core import PdfDocument, build_sample_pdf
+from pdf_lite.core import (
+    PdfDocument,
+    build_sample_pdf,
+    build_signature_strokes_from_template,
+    signature_template_from_vertices,
+)
 from pdf_lite.editor import (
     delete_content_rect,
     draw_table_in_pdf,
@@ -172,6 +178,39 @@ class TestEditorRoutines(unittest.TestCase):
             self.assertIn("PERSISTED EDIT MARKER", text)
         finally:
             reopened.close()
+
+    def test_ink_signature_hit_and_move(self):
+        doc = PdfDocument(self.sample_pdf)
+        try:
+            template = [[(0.1, 0.2), (0.5, 0.8), (0.9, 0.3)]]
+            strokes = build_signature_strokes_from_template(template, 100.0, 650.0, 120.0, 48.0)
+            xref = doc.add_ink_signature(0, strokes)
+            mid = doc.ink_signature_at_point(0, (160.0, 680.0))
+            self.assertEqual(mid, xref)
+            moved = build_signature_strokes_from_template(template, 220.0, 500.0, 120.0, 48.0)
+            new_xref = doc.replace_ink_signature(0, xref, moved)
+            verts = doc.ink_signature_vertices(0, new_xref)
+            rec_tmpl, ax, ay, width, height = signature_template_from_vertices(verts)
+            self.assertAlmostEqual(ax, 232.0, places=0)
+            self.assertAlmostEqual(ay, 509.6, places=0)
+            self.assertEqual(len(rec_tmpl), len(template))
+        finally:
+            doc.close()
+
+    def test_atomic_save_clears_readonly(self):
+        os.chmod(self.sample_pdf, stat.S_IREAD)
+        doc = PdfDocument(self.sample_pdf)
+        try:
+            insert_text_in_pdf(doc, 0, (70.0, 90.0), "READONLY SAVE CHECK")
+            doc.save()
+        finally:
+            doc.close()
+        reopened = PdfDocument(self.sample_pdf)
+        try:
+            self.assertIn("READONLY SAVE CHECK", reopened.text(0))
+        finally:
+            reopened.close()
+        os.chmod(self.sample_pdf, stat.S_IWRITE | stat.S_IREAD)
 
     def test_get_element_at_point(self):
         doc = PdfDocument(self.sample_pdf)

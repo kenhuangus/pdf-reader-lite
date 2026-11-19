@@ -11,7 +11,12 @@ from urllib.parse import urlsplit
 import fitz
 from PIL import Image, ImageTk
 
-from .core import BASE_SCALE, PdfDocument
+from .core import (
+    BASE_SCALE,
+    PdfDocument,
+    build_signature_strokes_from_template,
+    signature_template_from_vertices,
+)
 from .editor import get_element_at_point
 
 
@@ -70,6 +75,8 @@ class ContinuousView(tk.Frame):
         self._signature_strokes: list[list[tuple[float, float]]] = []
         self._signature_ratio = 1.0
         self._signature_width = 180.0
+        self._signature_adjust: dict | None = None
+        self._signature_drag: tuple[float, float] | None = None
         self.mode = MODE_READ
         self.edit_mode = False
         self._pan_origin: tuple[int, int] | None = None
@@ -135,6 +142,7 @@ class ContinuousView(tk.Frame):
         self.current_hit = None
         self._last_page = -1
         self.cancel_signature_placement(silent=True)
+        self.finish_signature_adjust(silent=True)
         self.clear_selection()
         self.canvas.delete("all")
         self.canvas.configure(scrollregion=(0, 0, 0, 0))
@@ -637,6 +645,8 @@ class ContinuousView(tk.Frame):
             return
         if self._placing_signature:
             self.canvas.configure(cursor="crosshair")
+        elif self._signature_adjust is not None:
+            self.canvas.configure(cursor="hand2")
         elif self.mode == MODE_EDIT:
             self.canvas.configure(cursor="pencil")
         elif self.mode == MODE_SELECT:
@@ -646,6 +656,28 @@ class ContinuousView(tk.Frame):
 
     def _on_button_press(self, event) -> None:
         if self.doc is None or not self.layout:
+            return
+        if self._signature_adjust is not None:
+            page = self._page_at_canvas_y(event.y)
+            if page is None:
+                return
+            ax = self.canvas.canvasx(event.x)
+            ay = self.canvas.canvasy(event.y)
+            point = self._screen_to_page(page, ax, ay)
+            if point is None:
+                return
+            if page != self._signature_adjust["page"]:
+                self._relocate_signature_to_point(page, point)
+                return
+            adj = self._signature_adjust
+            box = (adj["anchor_x"], adj["anchor_y"],
+                   adj["anchor_x"] + adj["width"], adj["anchor_y"] + adj["height"])
+            px, py = point
+            if box[0] <= px <= box[2] and box[1] <= py <= box[3]:
+                self._signature_drag = (px - adj["anchor_x"], py - adj["anchor_y"])
+            else:
+                self._relocate_signature_to_point(page, point)
+            self.canvas.focus_set()
             return
         if self._placing_signature:
             page = self._page_at_canvas_y(event.y)
@@ -669,6 +701,10 @@ class ContinuousView(tk.Frame):
             ay = self.canvas.canvasy(event.y)
             point = self._screen_to_page(page, ax, ay)
             if point is not None:
+                xref = self.doc.ink_signature_at_point(page, point)
+                if xref is not None:
+                    self._select_signature_for_adjust(page, xref)
+                    return
                 self.app.handle_click_to_edit(page, point)
                 return
 
@@ -696,6 +732,19 @@ class ContinuousView(tk.Frame):
         self.canvas.configure(cursor="xterm")
 
     def _on_drag(self, event) -> None:
+        if self._signature_drag is not None and self._signature_adjust is not None:
+            page = self._page_at_canvas_y(event.y)
+            if page is None or page != self._signature_adjust["page"]:
+                return
+            ax = self.canvas.canvasx(event.x)
+            ay = self.canvas.canvasy(event.y)
+            point = self._screen_to_page(page, ax, ay)
+            if point is None:
+                return
+            off_x, off_y = self._signature_drag
+            self._set_signature_anchor(point[0] - off_x, point[1] - off_y, page)
+            self._commit_signature_position()
+            return
         if self.mode == MODE_READ:
             if self._pan_origin is not None:
                 dx = abs(event.x - self._pan_origin[0])
@@ -756,6 +805,10 @@ class ContinuousView(tk.Frame):
         self.selection_text = "\n".join(chunks).strip()
 
     def _on_button_release(self, event) -> None:
+        if self._signature_drag is not None:
+            self._signature_drag = None
+            self._update_cursor()
+            return
         if self.mode == MODE_READ:
             if not self._sel_dragged and self._pan_origin is not None:
                 page = self._page_at_canvas_y(event.y)
@@ -1032,6 +1085,17 @@ class ContinuousView(tk.Frame):
             finally:
                 menu.grab_release()
             return
+        if self._signature_adjust is not None:
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Finish Moving Signature",
+                             command=self.finish_signature_adjust)
+            menu.add_command(label="Cancel Signature Move",
+                             command=self.finish_signature_adjust)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
         page = self._page_at_canvas_y(event.y)
         if page is None:
             return
@@ -1114,6 +1178,7 @@ class ContinuousView(tk.Frame):
     # ------------------------------------------------------------------
     def begin_signature_placement(self, strokes: list[list[tuple[float, float]]],
                                   ratio: float, width_pt: float) -> None:
+        self.finish_signature_adjust(silent=True)
         self._signature_strokes = strokes
         self._signature_ratio = max(0.05, min(2.0, ratio))
         self._signature_width = max(40.0, min(300.0, width_pt))
@@ -1132,47 +1197,176 @@ class ContinuousView(tk.Frame):
         if not silent:
             self.app.set_status("Signature placement cancelled")
 
+    def _signature_box_at_point(
+        self,
+        number: int,
+        point: tuple[float, float],
+        template_strokes: list[list[tuple[float, float]]],
+        ratio: float,
+        width_pt: float,
+    ) -> tuple[float, float, float, float]:
+        page_rect = self.doc.page(number).rect
+        margin = 6.0
+        width = min(width_pt, max(40.0, page_rect.width * 0.5))
+        height = max(20.0, width * ratio)
+        if width + 2 * margin > page_rect.width:
+            width = max(20.0, page_rect.width - 2 * margin)
+            height = max(10.0, width * ratio)
+        if height + 2 * margin > page_rect.height:
+            height = max(10.0, page_rect.height - 2 * margin)
+            width = max(10.0, height / max(0.05, ratio))
+        px, py = point
+        start_x = max(page_rect.x0 + margin,
+                      min(px, page_rect.x1 - width - margin))
+        start_y = max(page_rect.y0 + margin,
+                      min(py, page_rect.y1 - height - margin))
+        return start_x, start_y, width, height
+
+    def _set_signature_anchor(
+        self,
+        anchor_x: float,
+        anchor_y: float,
+        page_num: int,
+    ) -> None:
+        if self._signature_adjust is None or self.doc is None:
+            return
+        adj = self._signature_adjust
+        ratio = adj["ratio"]
+        page_rect = self.doc.page(page_num).rect
+        margin = 6.0
+        width = adj["width"]
+        height = adj["height"]
+        start_x = max(page_rect.x0 + margin,
+                      min(anchor_x, page_rect.x1 - width - margin))
+        start_y = max(page_rect.y0 + margin,
+                      min(anchor_y, page_rect.y1 - height - margin))
+        adj["anchor_x"] = start_x
+        adj["anchor_y"] = start_y
+        adj["page"] = page_num
+
+    def _begin_signature_adjust(
+        self,
+        number: int,
+        xref: int,
+        template_strokes: list[list[tuple[float, float]]],
+        ratio: float,
+        width_pt: float,
+        anchor_x: float,
+        anchor_y: float,
+        width: float,
+        height: float,
+    ) -> None:
+        self._signature_adjust = {
+            "page": number,
+            "xref": xref,
+            "template": template_strokes,
+            "ratio": ratio,
+            "width_pt": width_pt,
+            "anchor_x": anchor_x,
+            "anchor_y": anchor_y,
+            "width": width,
+            "height": height,
+        }
+        self._signature_drag = None
+        self._update_cursor()
+
+    def finish_signature_adjust(self, silent: bool = False) -> None:
+        if self._signature_adjust is None:
+            return
+        self._signature_adjust = None
+        self._signature_drag = None
+        self._update_cursor()
+        if not silent:
+            self.app.set_status(
+                "Signature position set — drag again in Edit mode or press Ctrl+S to save",
+                7000,
+            )
+
+    def _commit_signature_position(self) -> None:
+        if self.doc is None or self._signature_adjust is None:
+            return
+        adj = self._signature_adjust
+        strokes = build_signature_strokes_from_template(
+            adj["template"],
+            adj["anchor_x"],
+            adj["anchor_y"],
+            adj["width"],
+            adj["height"],
+        )
+        if not strokes:
+            return
+        try:
+            adj["xref"] = self.doc.replace_ink_signature(adj["page"], adj["xref"], strokes)
+        except Exception as exc:
+            self.app.set_status(f"Could not move signature: {exc}")
+            return
+        self._invalidate_page(adj["page"])
+        self.app.mark_modified()
+
+    def _relocate_signature_to_point(self, page: int, point: tuple[float, float]) -> None:
+        if self.doc is None or self._signature_adjust is None:
+            return
+        adj = self._signature_adjust
+        start_x, start_y, width, height = self._signature_box_at_point(
+            page, point, adj["template"], adj["ratio"], adj["width_pt"])
+        adj["width"] = width
+        adj["height"] = height
+        self._set_signature_anchor(start_x, start_y, page)
+        self._commit_signature_position()
+
+    def _select_signature_for_adjust(self, page: int, xref: int) -> None:
+        if self.doc is None:
+            return
+        try:
+            vertices = self.doc.ink_signature_vertices(page, xref)
+            template, ax, ay, width, height = signature_template_from_vertices(vertices)
+        except Exception as exc:
+            self.app.set_status(f"Could not select signature: {exc}")
+            return
+        ratio = height / max(width, 1.0)
+        self._begin_signature_adjust(
+            page, xref, template, ratio, width,
+            ax, ay, width, height,
+        )
+        self.app.set_status(
+            f"Drag the signature to move it on page {page + 1}. Esc when done.",
+            10000,
+        )
+
     def _place_signature_at(self, number: int, x: float, y: float) -> None:
         if self.doc is None or not self._signature_strokes:
             return
         point = self._screen_to_page(number, x, y)
         if point is None:
             return
-        page_rect = self.doc.page(number).rect
-        margin = 6.0
-        width = min(self._signature_width, max(40.0, page_rect.width * 0.5))
-        height = max(20.0, width * self._signature_ratio)
-        if width + 2 * margin > page_rect.width:
-            width = max(20.0, page_rect.width - 2 * margin)
-            height = max(10.0, width * self._signature_ratio)
-        if height + 2 * margin > page_rect.height:
-            height = max(10.0, page_rect.height - 2 * margin)
-            width = max(10.0, height / max(0.05, self._signature_ratio))
-        start_x = max(page_rect.x0 + margin,
-                      min(point[0], page_rect.x1 - width - margin))
-        start_y = max(page_rect.y0 + margin,
-                      min(point[1], page_rect.y1 - height - margin))
-        pdf_strokes: list[list[tuple[float, float]]] = []
-        for stroke in self._signature_strokes:
-            converted = [(start_x + px * width, start_y + py * height)
-                         for px, py in stroke]
-            if len(converted) >= 2:
-                pdf_strokes.append(converted)
+        template = self._signature_strokes
+        ratio = self._signature_ratio
+        width_pt = self._signature_width
+        start_x, start_y, width, height = self._signature_box_at_point(
+            number, point, template, ratio, width_pt)
+        pdf_strokes = build_signature_strokes_from_template(
+            template, start_x, start_y, width, height)
         if not pdf_strokes:
             self.app.set_status("Signature is too small to place")
             return
         try:
-            self.doc.add_ink_signature(number, pdf_strokes)
+            xref = self.doc.add_ink_signature(number, pdf_strokes)
         except Exception as exc:
             self.app.set_status(f"Could not add signature: {exc}")
             return
         self._placing_signature = False
         self._signature_strokes = []
-        self.canvas.configure(cursor="")
+        self._begin_signature_adjust(
+            number, xref, template, ratio, width_pt,
+            start_x, start_y, width, height,
+        )
         self._invalidate_page(number)
         self.app.mark_modified()
         self.app.set_status(
-            f"Signature added to page {number + 1} — Ctrl+S to save a signed copy", 9000)
+            f"Signature on page {number + 1} — drag to reposition, click elsewhere to move, "
+            "Esc when done, then Ctrl+S to save",
+            12000,
+        )
 
     def _invalidate_page(self, number: int) -> None:
         keys = [key for key in self._cache if key[0] == number]
