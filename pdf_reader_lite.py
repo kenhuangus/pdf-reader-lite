@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 APP_NAME = "PDF Lite"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 
 def _enable_windows_quality() -> None:

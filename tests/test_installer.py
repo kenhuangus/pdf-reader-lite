@@ -53,7 +53,7 @@ class TestMsiPackage(unittest.TestCase):
         props = json.loads(result.stdout)
         self.assertEqual(props.get("ProductName"), "PDF Lite")
         self.assertEqual(props.get("Manufacturer"), "Ken Huang")
-        self.assertEqual(props.get("ProductVersion"), "1.0.1")
+        self.assertEqual(props.get("ProductVersion"), "1.0.2")
 
 
 if __name__ == "__main__":

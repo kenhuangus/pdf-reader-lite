@@ -24,7 +24,7 @@ from .view import (ContinuousView, MODE_READ, MODE_SELECT, MODE_EDIT)
 
 
 APP_NAME = "PDF Lite"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "PDF Lite"
 RECENT_PATH = CONFIG_DIR / "recent.json"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
@@ -1434,18 +1434,15 @@ class PDFLiteApp(tk.Tk):
         if self._word_dialog_open:
             self.set_status("A Word conversion is already running")
             return
-        soffice = find_soffice()
-        mode = self._choose_word_mode(bool(soffice))
-        if mode is None:
-            return
         source = os.path.abspath(self.doc.path)
         target = filedialog.asksaveasfilename(
             parent=self,
-            title="Save as Word document",
+            title="Choose where to save the Word document",
             initialdir=os.path.dirname(source),
             initialfile=f"{os.path.splitext(os.path.basename(source))[0]}.docx",
             defaultextension=".docx",
             filetypes=[("Word document", "*.docx")],
+            confirmoverwrite=True,
         )
         if not target:
             return
@@ -1453,9 +1450,15 @@ class PDFLiteApp(tk.Tk):
             messagebox.showwarning("Security Warning", "Saving to remote network (UNC) paths is blocked for security.", parent=self)
             return
         target = os.path.abspath(target)
+        mode = self._choose_word_mode(bool(find_soffice()))
+        if mode is None:
+            return
         self._start_word_conversion(target, mode)
 
     def _start_word_conversion(self, target: str, mode: str) -> None:
+        if self.doc is None:
+            return
+        source, password = self.doc.path, self.doc.password
         self._word_dialog_open = True
         dialog = tk.Toplevel(self)
         dialog.title("Converting to Word")
@@ -1498,10 +1501,10 @@ class PDFLiteApp(tk.Tk):
         def worker() -> None:
             try:
                 method = convert_pdf_to_word(
-                    self.doc.path, target,
-                    self.doc.password, mode,
+                    source, target,
+                    password, mode,
                     progress_callback=on_progress,
-                ) if self.doc else None
+                )
             except Exception as exc:
                 message_queue.put(("error", str(exc)))
             else:
@@ -1552,14 +1555,19 @@ class PDFLiteApp(tk.Tk):
                     dialog.destroy()
                 except tk.TclError:
                     pass
-                method = message[1]
-                self.set_status(f"Word document created: {os.path.basename(target)}", 10_000)
-                messagebox.showinfo(
-                    APP_NAME,
-                    f"Word document created successfully!\n\n"
-                    f"{target}\n\n"
-                    f"Method: {method}",
-                    parent=self)
+                try:
+                    if not os.path.isfile(target):
+                        raise FileNotFoundError("The generated document could not be found.")
+                    os.startfile(target)
+                except OSError as exc:
+                    self.set_status(f"Word export finished; could not open: {target}", 10_000)
+                    messagebox.showwarning(
+                        APP_NAME,
+                        f"Word export finished, but the document could not be opened automatically.\n\n"
+                        f"Save location: {target}\n\n{exc}",
+                        parent=self)
+                else:
+                    self.set_status(f"Word document saved and opened: {target}", 10_000)
                 return
 
         if self._word_dialog_open:

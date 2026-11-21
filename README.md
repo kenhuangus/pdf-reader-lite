@@ -98,7 +98,11 @@ editing, and redaction commands. In-place saving uses atomic replacement;
 
 ## PDF to Word
 
-Use **Tools > Convert PDF to Word…** or **Ctrl+Shift+E**. Two modes are offered:
+Use **Tools > Convert PDF to Word…** or **Ctrl+Shift+E**. First choose the folder
+and filename for the new `.docx`, then choose a conversion mode. After conversion,
+PDF Lite opens the document in your default Word-compatible application. If it
+cannot open the file, a message shows the saved location so you can open it manually.
+Two modes are offered:
 
 | Mode | What it does | When to use |
 |---|---|---|
