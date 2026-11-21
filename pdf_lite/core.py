@@ -354,6 +354,57 @@ class PdfDocument:
             self._doc.save(target, garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_KEEP)
             return target
 
+    def save_with_placements(self, placements, path=None):
+        """Flatten draft figures/signatures only if saving succeeds.
+
+        Work on a clone so a failed save retains all edits and movable drafts.
+        Signatures become page drawing content rather than movable annotations.
+        """
+        import io
+        original = self._doc
+        clone = fitz.open(stream=original.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP), filetype="pdf")
+        if clone.needs_pass:
+            clone.authenticate(self.password or "")
+        self._doc = clone
+        try:
+            for item in placements:
+                page = self.page(item["page"])
+                rect = fitz.Rect(item["rect"])
+                if item["kind"] == "image":
+                    buf = io.BytesIO()
+                    item["image"].save(buf, format="PNG")
+                    page.insert_image(rect, stream=buf.getvalue())
+                else:
+                    strokes = build_signature_strokes_from_template(
+                        item["strokes"], rect.x0, rect.y0, rect.width, rect.height)
+                    shape = page.new_shape()
+                    for stroke in strokes:
+                        shape.draw_polyline(stroke)
+                    shape.finish(color=INK_SIGNATURE_STROKE_COLOR,
+                                 width=INK_SIGNATURE_BORDER_WIDTH, closePath=False)
+                    shape.commit()
+            # Release the file handle before Windows replaces the active file.
+            # Keep an in-memory backup for complete rollback on save failure.
+            backup = fitz.open(stream=original.tobytes(encryption=fitz.PDF_ENCRYPT_KEEP), filetype="pdf")
+            if backup.needs_pass:
+                backup.authenticate(self.password or "")
+            original.close()
+            original = backup
+            result = self.save(path)
+        except Exception:
+            if self._doc is not None:
+                self._doc.close()
+            self._doc = original
+            self._words.clear()
+            self._text.clear()
+            self._links.clear()
+            raise
+        original.close()
+        self._words.clear()
+        self._text.clear()
+        self._links.clear()
+        return result
+
     def save_copy(self, path: str) -> None:
         """Save the in-memory document (including new annotations) as a copy."""
         if str(path).startswith(("\\\\", "//")):

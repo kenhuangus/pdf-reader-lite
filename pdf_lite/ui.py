@@ -15,20 +15,16 @@ from tkinter import filedialog, messagebox, ttk
 from .convert import convert_pdf_to_word, find_soffice
 from .core import (DocumentInfo, PasswordRequired, PdfDocument, WrongPassword,
                    human_size, search_document)
-from .editor import (AddImageDialog, EditTextDialog, InsertChoiceDialog,
-                     ManageImagesDialog, TableEditorDialog, delete_content_rect,
-                     draw_table_in_pdf, get_element_at_point, get_page_images,
-                     get_page_tables, get_text_properties_at_rect,
-                     insert_image_in_pdf, insert_text_in_pdf,
-                     replace_image_in_pdf, replace_selected_text_in_pdf,
-                     replace_text_in_pdf)
+from .editor import (ManageImagesDialog, TableEditorDialog, delete_content_rect,
+                     draw_table_in_pdf, get_page_images, get_page_tables,
+                     get_text_properties_at_rect, load_figure, replace_image_in_pdf)
 from .signature import ask_signature
 from .thumbs import ThumbnailPanel
 from .view import (ContinuousView, MODE_READ, MODE_SELECT, MODE_EDIT)
 
 
 APP_NAME = "PDF Lite"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "PDF Lite"
 RECENT_PATH = CONFIG_DIR / "recent.json"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
@@ -282,12 +278,12 @@ class PDFLiteApp(tk.Tk):
         edit_menu.add_command(label="Select Entire Document", accelerator="Ctrl+Shift+A", command=self.select_all_document)
         edit_menu.add_separator()
         self.edit_mode_var = tk.BooleanVar(value=False)
-        edit_menu.add_checkbutton(label="Click-to-Edit Mode", variable=self.edit_mode_var,
+        edit_menu.add_checkbutton(label="Edit Mode (double-click to type)", variable=self.edit_mode_var,
                                   accelerator="Ctrl+E", command=self.toggle_edit_mode)
         edit_menu.add_command(label="Edit Selected Text…", command=self.action_edit_or_add_text)
         edit_menu.add_command(label="Delete (Redact) Selected Text", command=self.action_delete_selection)
         edit_menu.add_command(label="Add Text Box…", accelerator="Ctrl+T",
-                              command=lambda: self.add_text_at(self.current_page, (50.0, 100.0)))
+                              command=self.start_text_insertion)
         edit_menu.add_command(label="Insert Image…", accelerator="Ctrl+I",
                               command=lambda: self.add_image_at(self.current_page))
         edit_menu.add_command(label="Manage Images on Page…",
@@ -310,8 +306,8 @@ class PDFLiteApp(tk.Tk):
                                   value=MODE_READ, accelerator="Ctrl+1", command=self.set_read_mode)
         view_menu.add_radiobutton(label="Select Mode (Text Selection)", variable=self.mode_var,
                                   value=MODE_SELECT, accelerator="Ctrl+2", command=self.set_select_mode)
-        view_menu.add_radiobutton(label="Click-to-Edit Mode", variable=self.mode_var,
-                                  value=MODE_EDIT, accelerator="Ctrl+E", command=self.toggle_edit_mode)
+        view_menu.add_radiobutton(label="Edit Mode (double-click to type)", variable=self.mode_var,
+                                  value=MODE_EDIT, accelerator="Ctrl+E", command=lambda: self.set_mode(MODE_EDIT))
         view_menu.add_separator()
         view_menu.add_command(label="Fit Width", command=self.fit_width)
         view_menu.add_command(label="Fit Page", command=self.fit_page)
@@ -363,94 +359,93 @@ class PDFLiteApp(tk.Tk):
     def _build_toolbar(self) -> None:
         self.toolbar = ttk.Frame(self, style="Toolbar.TFrame", padding=(9, 6))
         self.toolbar.grid(row=0, column=0, sticky="ew")
-        for column in range(18):
-            self.toolbar.grid_columnconfigure(column, weight=0)
-        self.brand = ttk.Label(self.toolbar, text="PDF LITE", style="Brand.TLabel")
+        self.navigation_bar = ttk.Frame(self.toolbar, style="Toolbar.TFrame")
+        self.navigation_bar.pack(fill="x")
+        self.editing_bar = ttk.Frame(self.toolbar, style="Toolbar.TFrame")
+        self.editing_bar.pack(fill="x", pady=(5, 0))
+        self.brand = ttk.Label(self.navigation_bar, text="PDF LITE", style="Brand.TLabel")
         self.brand.pack(side="left", padx=(2, 12))
 
-        self.back_btn = ttk.Button(self.toolbar, text="←", width=3, style="Toolbar.TButton",
+        self.back_btn = ttk.Button(self.navigation_bar, text="←", width=3, style="Toolbar.TButton",
                                    command=self.history_back)
         self.back_btn.pack(side="left", padx=(0, 2))
-        self.fwd_btn = ttk.Button(self.toolbar, text="→", width=3, style="Toolbar.TButton",
+        self.fwd_btn = ttk.Button(self.navigation_bar, text="→", width=3, style="Toolbar.TButton",
                                  command=self.history_forward)
         self.fwd_btn.pack(side="left", padx=(0, 6))
-        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=5)
-        self.prev_btn = ttk.Button(self.toolbar, text="‹", width=3, style="Toolbar.TButton",
+        ttk.Separator(self.navigation_bar, orient="vertical").pack(side="left", fill="y", padx=5)
+        self.prev_btn = ttk.Button(self.navigation_bar, text="‹", width=3, style="Toolbar.TButton",
                                    command=self.previous_page)
         self.prev_btn.pack(side="left", padx=(0, 2))
         self.page_var = tk.StringVar(value="1")
-        self.page_entry = ttk.Entry(self.toolbar, width=5, justify="center",
+        self.page_entry = ttk.Entry(self.navigation_bar, width=5, justify="center",
                                     textvariable=self.page_var, style="Toolbar.TEntry")
         self.page_entry.pack(side="left", padx=(0, 1))
         self.page_entry.bind("<Return>", lambda _e: self._page_entry_go())
         self.page_entry.bind("<FocusIn>", lambda _e: self.page_entry.select_range(0, "end"))
-        self.page_total = ttk.Label(self.toolbar, text="/ —", style="Toolbar.TLabel")
+        self.page_total = ttk.Label(self.navigation_bar, text="/ —", style="Toolbar.TLabel")
         self.page_total.pack(side="left", padx=(0, 2))
-        self.next_btn = ttk.Button(self.toolbar, text="›", width=3, style="Toolbar.TButton",
+        self.next_btn = ttk.Button(self.navigation_bar, text="›", width=3, style="Toolbar.TButton",
                                    command=self.next_page)
         self.next_btn.pack(side="left", padx=(0, 4))
-        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=5)
+        ttk.Separator(self.navigation_bar, orient="vertical").pack(side="left", fill="y", padx=5)
 
-        self.zoom_out_btn = ttk.Button(self.toolbar, text="−", width=3, style="Toolbar.TButton",
+        self.zoom_out_btn = ttk.Button(self.navigation_bar, text="−", width=3, style="Toolbar.TButton",
                                        command=self.zoom_out)
         self.zoom_out_btn.pack(side="left", padx=(0, 2))
         self.zoom_var = tk.StringVar(value="100")
-        self.zoom_entry = ttk.Entry(self.toolbar, width=6, justify="center",
+        self.zoom_entry = ttk.Entry(self.navigation_bar, width=6, justify="center",
                                     textvariable=self.zoom_var, style="Toolbar.TEntry")
         self.zoom_entry.pack(side="left", padx=(0, 1))
         self.zoom_entry.bind("<Return>", lambda _e: self._zoom_entry_commit())
         self.zoom_entry.bind("<FocusIn>", lambda _e: self.zoom_entry.select_range(0, "end"))
-        self.zoom_suffix = ttk.Label(self.toolbar, text="%", style="Toolbar.TLabel")
+        self.zoom_suffix = ttk.Label(self.navigation_bar, text="%", style="Toolbar.TLabel")
         self.zoom_suffix.pack(side="left", padx=(0, 2))
-        self.zoom_in_btn = ttk.Button(self.toolbar, text="+", width=3, style="Toolbar.TButton",
+        self.zoom_in_btn = ttk.Button(self.navigation_bar, text="+", width=3, style="Toolbar.TButton",
                                       command=self.zoom_in)
         self.zoom_in_btn.pack(side="left", padx=(0, 6))
-        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=5)
+        ttk.Separator(self.navigation_bar, orient="vertical").pack(side="left", fill="y", padx=5)
 
-        self.fit_width_btn = ttk.Button(self.toolbar, text="Fit W", style="Toolbar.TButton",
+        self.fit_width_btn = ttk.Button(self.navigation_bar, text="Fit W", style="Toolbar.TButton",
                                         command=self.fit_width)
         self.fit_width_btn.pack(side="left", padx=(0, 2))
-        self.fit_page_btn = ttk.Button(self.toolbar, text="Fit P", style="Toolbar.TButton",
+        self.fit_page_btn = ttk.Button(self.navigation_bar, text="Fit P", style="Toolbar.TButton",
                                        command=self.fit_page)
         self.fit_page_btn.pack(side="left", padx=(0, 6))
-        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=5)
+        ttk.Separator(self.navigation_bar, orient="vertical").pack(side="left", fill="y", padx=5)
 
-        self.save_btn = ttk.Button(self.toolbar, text="Save", style="Toolbar.TButton",
+        self.save_btn = ttk.Button(self.editing_bar, text="Save", style="Toolbar.TButton",
                                    command=self.save_document)
         self.save_btn.pack(side="left", padx=(0, 2))
-        self.read_mode_btn = ttk.Button(self.toolbar, text="✋ Read Mode", style="Accent.TButton",
+        self.read_mode_btn = ttk.Button(self.editing_bar, text="Read Mode", style="Accent.TButton",
                                         command=self.set_read_mode)
         self.read_mode_btn.pack(side="left", padx=(0, 2))
-        self.select_mode_btn = ttk.Button(self.toolbar, text="I Select Mode", style="Toolbar.TButton",
+        self.select_mode_btn = ttk.Button(self.editing_bar, text="Select Text", style="Toolbar.TButton",
                                           command=self.set_select_mode)
         self.select_mode_btn.pack(side="left", padx=(0, 2))
-        self.edit_mode_btn = ttk.Button(self.toolbar, text="✎ Edit Mode", style="Toolbar.TButton",
+        self.edit_mode_btn = ttk.Button(self.editing_bar, text="Edit Mode", style="Toolbar.TButton",
                                         command=self.toggle_edit_mode)
         self.edit_mode_btn.pack(side="left", padx=(0, 2))
-        self.text_btn = ttk.Button(self.toolbar, text="Text", style="Toolbar.TButton",
-                                   command=self.action_edit_or_add_text)
-        self.text_btn.pack(side="left", padx=(0, 2))
-        self.img_btn = ttk.Button(self.toolbar, text="Image", style="Toolbar.TButton",
-                                   command=lambda: self.add_image_at(self.current_page))
-        self.img_btn.pack(side="left", padx=(0, 2))
-        self.tbl_btn = ttk.Button(self.toolbar, text="Table", style="Toolbar.TButton",
-                                   command=lambda: self.add_table_at(self.current_page))
-        self.tbl_btn.pack(side="left", padx=(0, 2))
-        self.sign_btn = ttk.Button(self.toolbar, text="Sign", style="Toolbar.TButton",
-                                   command=self.hand_signature)
-        self.sign_btn.pack(side="left", padx=(0, 2))
-        self.word_btn = ttk.Button(self.toolbar, text="Word", style="Toolbar.TButton",
+        self.insert_btn = ttk.Menubutton(self.editing_bar, text="Insert", style="Toolbar.TButton")
+        self.insert_menu = tk.Menu(self.insert_btn, tearoff=0)
+        self.insert_menu.add_command(label="Text at a position", command=self.start_text_insertion)
+        self.insert_menu.add_command(label="Figure / Image...", command=lambda: self.add_image_at(self.current_page))
+        self.insert_menu.add_command(label="Signature...", command=self.hand_signature)
+        self.insert_menu.add_separator()
+        self.insert_menu.add_command(label="Table...", command=lambda: self.add_table_at(self.current_page))
+        self.insert_btn.configure(menu=self.insert_menu)
+        self.insert_btn.pack(side="left", padx=(0, 2))
+        self.word_btn = ttk.Button(self.editing_bar, text="Word", style="Toolbar.TButton",
                                    command=self.export_word)
         self.word_btn.pack(side="left", padx=(0, 6))
-        ttk.Separator(self.toolbar, orient="vertical").pack(side="left", fill="y", padx=5)
+        ttk.Separator(self.editing_bar, orient="vertical").pack(side="left", fill="y", padx=5)
 
-        self.find_btn = ttk.Button(self.toolbar, text="Find", style="Toolbar.TButton",
+        self.find_btn = ttk.Button(self.editing_bar, text="Find", style="Toolbar.TButton",
                                    command=self.show_find)
         self.find_btn.pack(side="left", padx=(0, 2))
-        self.sidebar_btn = ttk.Button(self.toolbar, text="Sidebar", style="Toolbar.TButton",
+        self.sidebar_btn = ttk.Button(self.editing_bar, text="Sidebar", style="Toolbar.TButton",
                                       command=self.toggle_sidebar)
         self.sidebar_btn.pack(side="left", padx=(0, 2))
-        self.open_btn = ttk.Button(self.toolbar, text="Open", style="Accent.TButton",
+        self.open_btn = ttk.Button(self.editing_bar, text="Open", style="Accent.TButton",
                                    command=self.open_dialog)
         self.open_btn.pack(side="left", padx=(8, 0))
 
@@ -458,7 +453,7 @@ class PDFLiteApp(tk.Tk):
             self.back_btn, self.fwd_btn, self.prev_btn, self.next_btn, self.zoom_out_btn,
             self.zoom_in_btn, self.fit_width_btn, self.fit_page_btn, self.find_btn,
             self.save_btn, self.read_mode_btn, self.select_mode_btn, self.edit_mode_btn,
-            self.text_btn, self.img_btn, self.tbl_btn, self.sign_btn, self.word_btn,
+            self.insert_btn, self.word_btn,
         ]
 
     def _page_entry_go(self) -> None:
@@ -744,7 +739,7 @@ class PDFLiteApp(tk.Tk):
             safe_display = "".join(c for c in path if c.isprintable() and c not in "\r\n\t")
             messagebox.showerror(APP_NAME, f"File not found:\n{safe_display}", parent=self)
             return False
-        if self.modified and not self._confirm_save_changes():
+        if self.has_unsaved_changes and not self._confirm_save_changes():
             return False
         doc: PdfDocument | None = None
         for attempt in range(3):
@@ -799,7 +794,7 @@ class PDFLiteApp(tk.Tk):
     def close_document(self) -> None:
         if self.doc is None:
             return
-        if self.modified and not self._confirm_save_changes():
+        if self.has_unsaved_changes and not self._confirm_save_changes():
             return
         if self._search_cancel is not None:
             self._search_cancel.set()
@@ -856,7 +851,7 @@ class PDFLiteApp(tk.Tk):
         if self.doc is None or not self.path:
             self.title(f"{APP_NAME} — lightweight PDF reader")
             return
-        suffix = " *" if self.modified else ""
+        suffix = " *" if self.has_unsaved_changes else ""
         self.title(f"{os.path.basename(self.path)}{suffix} — {APP_NAME}")
 
     def mark_modified(self) -> None:
@@ -864,8 +859,12 @@ class PDFLiteApp(tk.Tk):
             self.modified = True
             self._refresh_title()
 
+    @property
+    def has_unsaved_changes(self) -> bool:
+        return self.modified or self.view.inline_has_changes()
+
     def _confirm_save_changes(self) -> bool:
-        if not self.modified:
+        if not self.has_unsaved_changes:
             return True
         answer = messagebox.askyesnocancel(
             "Unsaved changes",
@@ -882,17 +881,19 @@ class PDFLiteApp(tk.Tk):
         if self.doc is None:
             self.set_status("Open a PDF first")
             return False
+        if not self.view.commit_inline_text():
+            return False
         if not self.doc.path or self.doc.path.startswith("<"):
             return self.save_as()
         try:
-            saved_path = self.doc.save()
+            saved_path = self.doc.save_with_placements(self.view._pending_objects)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Could not save the PDF:\n{exc}", parent=self)
             return False
         self.doc.path = saved_path
         self.path = saved_path
         self.modified = False
-        self.view.finish_signature_adjust(silent=True)
+        self.view.placements_saved()
         if self.doc is not None:
             for page in range(self.doc.page_count):
                 self.view._invalidate_page(page)
@@ -906,6 +907,8 @@ class PDFLiteApp(tk.Tk):
     def save_as(self, quiet: bool = False) -> bool:
         if self.doc is None:
             self.set_status("Open a PDF first")
+            return False
+        if not self.view.commit_inline_text():
             return False
         source = os.path.abspath(self.doc.path)
         base = os.path.splitext(os.path.basename(source))[0]
@@ -926,10 +929,14 @@ class PDFLiteApp(tk.Tk):
         if os.path.normcase(target) == os.path.normcase(source):
             return self.save_document()
         try:
-            self.doc.save_copy(target)
+            self.doc.save_with_placements(self.view._pending_objects, target)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Could not save the PDF:\n{exc}", parent=self)
             return False
+        self.view.placements_saved()
+        for page in range(self.doc.page_count):
+            self.view._invalidate_page(page)
+            self.thumbnails.invalidate_page(page)
         self.doc.path = target
         self.path = target
         self.modified = False
@@ -957,7 +964,8 @@ class PDFLiteApp(tk.Tk):
         if self.doc is None:
             self.set_status("Open a PDF first")
             return
-        self.view.set_mode(mode)
+        if self.view.set_mode(mode) is False:
+            return
         if hasattr(self, "mode_var") and self.mode_var is not None:
             self.mode_var.set(mode)
         if hasattr(self, "edit_mode_var") and self.edit_mode_var is not None:
@@ -967,20 +975,20 @@ class PDFLiteApp(tk.Tk):
     def _update_mode_ui(self) -> None:
         mode = self.view.mode
         if mode == MODE_READ:
-            self.read_mode_btn.configure(style="Accent.TButton", text="✋ Read Mode")
-            self.select_mode_btn.configure(style="Toolbar.TButton", text="I Select Mode")
-            self.edit_mode_btn.configure(style="Toolbar.TButton", text="✎ Edit Mode")
-            self.set_status("Read Mode active — Drag to pan with touch or mouse, click links", 5_000)
+            self.read_mode_btn.configure(style="Accent.TButton", text="Read Mode")
+            self.select_mode_btn.configure(style="Toolbar.TButton", text="Select Text")
+            self.edit_mode_btn.configure(style="Toolbar.TButton", text="Edit Mode")
+            self.set_status("Read Mode: drag to pan; use arrows, Page Up/Down, or the wheel to navigate", 8000)
         elif mode == MODE_SELECT:
-            self.read_mode_btn.configure(style="Toolbar.TButton", text="✋ Read Mode")
-            self.select_mode_btn.configure(style="Accent.TButton", text="I Select Mode")
-            self.edit_mode_btn.configure(style="Toolbar.TButton", text="✎ Edit Mode")
+            self.read_mode_btn.configure(style="Toolbar.TButton", text="Read Mode")
+            self.select_mode_btn.configure(style="Accent.TButton", text="Select Text")
+            self.edit_mode_btn.configure(style="Toolbar.TButton", text="Edit Mode")
             self.set_status("Select Mode active — Drag to select text and display action menu", 5_000)
         elif mode == MODE_EDIT:
-            self.read_mode_btn.configure(style="Toolbar.TButton", text="✋ Read Mode")
-            self.select_mode_btn.configure(style="Toolbar.TButton", text="I Select Mode")
-            self.edit_mode_btn.configure(style="Accent.TButton", text="✎ Editing ON")
-            self.set_status("Click-to-Edit ON — Click anywhere in the document to edit or insert content", 8_000)
+            self.read_mode_btn.configure(style="Toolbar.TButton", text="Read Mode")
+            self.select_mode_btn.configure(style="Toolbar.TButton", text="Select Text")
+            self.edit_mode_btn.configure(style="Accent.TButton", text="Edit Mode")
+            self.set_status("Edit Mode: drag to pan; double-click to type; use Insert for figures and signatures", 10000)
 
     def toggle_edit_mode(self) -> None:
         if self.doc is None:
@@ -992,92 +1000,16 @@ class PDFLiteApp(tk.Tk):
             self.set_mode(MODE_EDIT)
 
     def handle_click_to_edit(self, page_num: int, point: tuple[float, float]) -> None:
+        self.view.begin_inline_text(page_num, point)
+
+    def start_text_insertion(self) -> None:
         if self.doc is None:
+            self.set_status("Open a PDF first")
             return
-        elem = get_element_at_point(self.doc, page_num, point)
-        kind = elem.get("type")
+        self.set_mode(MODE_EDIT)
+        self.view.canvas.focus_set()
+        self.set_status("Double-click anywhere on a page to add or edit text directly.", 10000)
 
-        if kind == "table":
-            table = elem["data"]
-            dialog = TableEditorDialog(
-                self,
-                initial_data=table["data"],
-                title=f"Edit Table on Page {page_num + 1}",
-                initial_rect=table["bbox"],
-            )
-            if dialog.result:
-                try:
-                    delete_content_rect(self.doc, page_num, table["bbox"])
-                    draw_table_in_pdf(
-                        self.doc,
-                        page_num,
-                        dialog.result["rect"],
-                        dialog.result["data"],
-                        has_header=dialog.result["has_header"],
-                    )
-                except Exception as exc:
-                    messagebox.showerror(APP_NAME, f"Could not update table: {exc}", parent=self)
-                    return
-                self.mark_modified()
-                self.view._invalidate_page(page_num)
-                self.thumbnails.invalidate_page(page_num)
-                self.set_status(f"Updated table on page {page_num + 1}", 5_000)
-
-        elif kind == "image":
-            img = elem["data"]
-            dialog = ManageImagesDialog(self, [img], page_num)
-            if dialog.result:
-                action = dialog.result.get("action")
-                try:
-                    if action == "delete":
-                        delete_content_rect(self.doc, page_num, dialog.result["rect"])
-                        self.set_status(f"Deleted image on page {page_num + 1}", 5_000)
-                    elif action == "replace":
-                        replace_image_in_pdf(self.doc, page_num, dialog.result["rect"], dialog.result["new_path"])
-                        self.set_status(f"Replaced image on page {page_num + 1}", 5_000)
-                except Exception as exc:
-                    messagebox.showerror(APP_NAME, f"Could not update image: {exc}", parent=self)
-                    return
-                self.mark_modified()
-                self.view._invalidate_page(page_num)
-                self.thumbnails.invalidate_page(page_num)
-
-        elif kind == "text_line":
-            dialog = EditTextDialog(
-                self,
-                initial_text=elem["text"],
-                initial_size=elem["fontsize"],
-                title=f"Edit Text (Page {page_num + 1})",
-            )
-            if dialog.result:
-                try:
-                    replace_text_in_pdf(
-                        self.doc,
-                        page_num,
-                        elem["bbox"],
-                        dialog.result["text"],
-                        fontname=dialog.result["fontname"],
-                        fontsize=dialog.result["fontsize"],
-                        text_color=dialog.result["color"],
-                    )
-                except Exception as exc:
-                    messagebox.showerror(APP_NAME, f"Could not edit text: {exc}", parent=self)
-                    return
-                self.mark_modified()
-                self.view.clear_selection()
-                self.view._invalidate_page(page_num)
-                self.thumbnails.invalidate_page(page_num)
-                self.set_status(f"Updated text on page {page_num + 1}", 5_000)
-
-        elif kind == "empty":
-            choice_dialog = InsertChoiceDialog(self, point)
-            choice = choice_dialog.result
-            if choice == "text":
-                self.add_text_at(page_num, point)
-            elif choice == "image":
-                self.add_image_at(page_num, point)
-            elif choice == "table":
-                self.add_table_at(page_num, point)
     def action_edit_or_add_text(self) -> None:
         if self.doc is None:
             self.set_status("Open a PDF first")
@@ -1103,33 +1035,8 @@ class PDFLiteApp(tk.Tk):
         bbox = (x0, y0, x1, y1)
 
         props = get_text_properties_at_rect(self.doc, page_num, bbox)
-        dialog = EditTextDialog(
-            self,
-            initial_text=text,
-            initial_size=props["fontsize"],
-            initial_font=props["fontname"],
-            initial_color=props["color"],
-            title="Edit Selected Text",
-        )
-        if dialog.result:
-            try:
-                replace_selected_text_in_pdf(
-                    self.doc,
-                    page_num,
-                    bbox,
-                    dialog.result["text"],
-                    fontname=dialog.result["fontname"],
-                    fontsize=dialog.result["fontsize"],
-                    text_color=dialog.result["color"],
-                )
-            except Exception as exc:
-                messagebox.showerror(APP_NAME, f"Could not edit text: {exc}", parent=self)
-                return
-            self.mark_modified()
-            self.view.clear_selection()
-            self.view._invalidate_page(page_num)
-            self.thumbnails.invalidate_page(page_num)
-            self.set_status(f"Updated text on page {page_num + 1}", 5_000)
+        self.view.begin_inline_text(page_num, (x0, y0),
+                                    element=dict(props, bbox=bbox, text=text))
 
     def action_delete_selection(self) -> None:
         if self.doc is None:
@@ -1166,47 +1073,27 @@ class PDFLiteApp(tk.Tk):
         if self.doc is None:
             self.set_status("Open a PDF first")
             return
-        dialog = EditTextDialog(self, initial_text="", title="Insert New Text Box")
-        if dialog.result:
-            try:
-                insert_text_in_pdf(
-                    self.doc,
-                    page_num,
-                    point,
-                    dialog.result["text"],
-                    fontname=dialog.result["fontname"],
-                    fontsize=dialog.result["fontsize"],
-                    text_color=dialog.result["color"],
-                )
-            except Exception as exc:
-                messagebox.showerror(APP_NAME, f"Could not insert text: {exc}", parent=self)
-                return
-            self.mark_modified()
-            self.view._invalidate_page(page_num)
-            self.thumbnails.invalidate_page(page_num)
-            self.set_status(f"Inserted text on page {page_num + 1}", 5_000)
+        self.view.begin_inline_text(page_num, point, new=True)
 
     def add_image_at(self, page_num: int, point: tuple[float, float] | None = None) -> None:
         if self.doc is None:
             self.set_status("Open a PDF first")
             return
-        page_rect = self.doc.page(page_num).rect
-        dialog = AddImageDialog(self, page_rect.width, page_rect.height)
-        if dialog.result:
-            rect = dialog.result["rect"]
-            if point is not None:
-                w = rect[2] - rect[0]
-                h = rect[3] - rect[1]
-                rect = (point[0], point[1], point[0] + w, point[1] + h)
-            try:
-                insert_image_in_pdf(self.doc, page_num, dialog.result["image_path"], rect)
-            except Exception as exc:
-                messagebox.showerror(APP_NAME, f"Could not insert image: {exc}", parent=self)
-                return
-            self.mark_modified()
-            self.view._invalidate_page(page_num)
-            self.thumbnails.invalidate_page(page_num)
-            self.set_status(f"Inserted image on page {page_num + 1}", 5_000)
+        if not self.view.commit_inline_text():
+            return
+        self.set_mode(MODE_EDIT)
+        path = filedialog.askopenfilename(parent=self, title="Insert figure",
+                filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.ico"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            image = load_figure(path)
+        except Exception as exc:
+            self.set_status(f"Could not load figure: {exc}", 10000)
+            return
+        self.view.begin_image_placement(image)
+        if point is not None:
+            self.view._place_object(page_num, point)
 
     def manage_images(self, page_num: int) -> None:
         if self.doc is None:
@@ -1297,6 +1184,9 @@ class PDFLiteApp(tk.Tk):
     def go_to_page(self, page_number: int, remember: bool = False) -> None:
         if self.doc is None:
             return
+        if not self.view.commit_inline_text():
+            return
+        self.view.canvas.focus_set()
         page_number = max(1, min(int(page_number), self.doc.page_count))
         old_page = self.current_page
         if remember and page_number - 1 != old_page:
@@ -1480,7 +1370,10 @@ class PDFLiteApp(tk.Tk):
         if self.doc is None:
             self.set_status("Open a PDF first")
             return
-        self.view.cancel_signature_placement(silent=True)
+        if not self.view.commit_inline_text():
+            return
+        self.set_mode(MODE_EDIT)
+        self.view.cancel_object_placement(silent=True)
         result = ask_signature(self, self.palette)
         if result is None:
             return
@@ -1838,10 +1731,10 @@ class PDFLiteApp(tk.Tk):
             ("Ctrl+Shift+S", "Save As (new copy)"),
             ("Ctrl+1", "Read Mode (touch screen / pan browsing)"),
             ("Ctrl+2", "Select Mode (text selection & popup menu)"),
-            ("Ctrl+E", "Toggle Click-to-Edit mode"),
-            ("Alt+Click", "Click anywhere to edit element"),
-            ("Ctrl+T", "Add text box"),
-            ("Ctrl+I", "Insert image"),
+            ("Ctrl+E", "Toggle Edit mode (double-click to type)"),
+            ("Double-click", "Edit text inline in Edit mode"),
+            ("Ctrl+T", "Edit mode: double-click a text position"),
+            ("Ctrl+I", "Choose figure, then click to place"),
             ("Ctrl+Shift+E", "Convert PDF to Word"),
             ("Ctrl+W", "Close document"),
             ("Ctrl+F", "Find text"),
@@ -1956,7 +1849,7 @@ class PDFLiteApp(tk.Tk):
         self.bind_all("<Control-s>", lambda _e: self.save_document())
         self.bind_all("<Control-Shift-S>", lambda _e: self.save_as())
         self.bind_all("<Control-e>", lambda _e: self.toggle_edit_mode())
-        self.bind_all("<Control-t>", lambda _e: self.add_text_at(self.current_page, (50.0, 100.0)))
+        self.bind_all("<Control-t>", lambda _e: self.start_text_insertion())
         self.bind_all("<Control-i>", lambda _e: self.add_image_at(self.current_page))
         self.bind_all("<Control-Shift-E>", lambda _e: self.export_word())
         self.bind_all("<F3>", lambda _e: self._find_next(1))
@@ -2073,10 +1966,13 @@ class PDFLiteApp(tk.Tk):
         return "break"
 
     def _on_escape(self, _event=None) -> None:
-        if self.view._placing_signature:
-            self.view.cancel_signature_placement()
-        elif self.view._signature_adjust is not None:
-            self.view.finish_signature_adjust()
+        if self.view._inline is not None:
+            self.view.cancel_inline_text()
+        elif self.view._placing_object is not None:
+            self.view.cancel_object_placement()
+        elif self.view._active_object is not None:
+            self.view._active_object = None
+            self.view._draw_drafts()
         elif self._fullscreen:
             self.toggle_fullscreen()
         elif self.searchbar.winfo_ismapped():
@@ -2089,7 +1985,7 @@ class PDFLiteApp(tk.Tk):
         if self._word_dialog_open:
             self.set_status("Word conversion is still running; wait for it to finish")
             return
-        if self.doc is not None and self.modified and not self._confirm_save_changes():
+        if self.doc is not None and self.has_unsaved_changes and not self._confirm_save_changes():
             return
         self._save_settings()
         if self._search_cancel is not None:

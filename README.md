@@ -37,10 +37,9 @@ python pdf_reader_lite.py --make-sample sample.pdf
 
 ## Reading features
 
-- **Dedicated Viewing and Editing Modes**:
-  - **✋ Read Mode (`Ctrl+1`)**: Optimized for reading and touch screen navigation. Dragging with fingers or mouse performs smooth canvas panning (`canvas.scan_mark` and `canvas.scan_dragto`), preventing accidental text selection. Clicking external or internal links opens them directly.
-  - **I Select Mode (`Ctrl+2`)**: Dragging selects text words and lines. Upon releasing the mouse or stylus, a quick popup action menu appears right at the release position for instant **Copy**, **✎ Edit Selected Text…**, **✂ Delete (Redact)**, **Select All on Page**, **Select Entire Document**, **Copy Page Text**, and **Copy Entire Document**.
-  - **✎ Click-to-Edit Mode (`Ctrl+E` / `Alt+Click`)**: Click anywhere in the document to edit lines, tables, images, or insert content at coordinates.
+- **Read Mode (`Ctrl+1`)**: drag with a finger or mouse to pan. Use the wheel, arrow keys, Page Up/Down, and page controls to navigate.
+- **Edit Mode (`Ctrl+E`)**: keep the same navigation; double-click anywhere inside a page to type directly in an inline editor, without an editing popup. Double-click existing text to change that line.
+- **Select Text (`Ctrl+2`)**: drag to select text for copying or explicit editing commands.
 - **Whole-document selection and copying**:
   - `Ctrl+A`: Select all text on the active page.
   - `Ctrl+Shift+A`: Select entire document text across all pages.
@@ -51,7 +50,7 @@ python pdf_reader_lite.py --make-sample sample.pdf
 - Fit Width, Fit Page, and Actual Size (`Ctrl+0`)
 - Zoom buttons, `Ctrl` + mouse wheel, and a zoom percentage field
 - Page field, previous/next/first/last navigation and back/forward history
-- Double-click a word to select it and show the action menu
+- Double-click a word in Select Text mode to select it and show copy/edit actions
 - Full-document background search with yellow match highlights and red current match; `F3` and `Shift+F3` step through results
 - PDF bookmarks/outline tree, live page thumbnails, and a document-info panel
 - Link annotation clicks for internal pages and external URLs
@@ -59,50 +58,43 @@ python pdf_reader_lite.py --make-sample sample.pdf
 - Encrypted PDFs with a password prompt
 - Recent documents and remembered sidebar/dark-mode settings
 
-## Interactive PDF editing (Text, Images, Tables)
+## Inline PDF editing
 
-PDF Lite supports comprehensive content modifications across any PDF:
+Switch to **Edit Mode** and double-click a position on the page. Type directly
+on the PDF. Double-click existing text to edit the line, or empty space to add
+text. Clicking outside the editor or pressing **Ctrl+Enter** applies the text;
+**Esc** cancels the active text edit. **Ctrl+S** applies the active text edit and
+saves the PDF. Text that does not fit stays in the editor with a status message
+so you can adjust it without losing the original text.
 
-- **Partial-Line Selected Text Editing**:
-  - In **Select Mode**, drag over any specific word or phrase.
-  - Choose **✎ Edit Selected Text…** from the popup menu, right-click context menu, or Edit menu.
-  - Only the selected text is brought into the edit dialog with auto-detected font family, size, and color.
-  - On applying changes, strictly the bounding box of the selected words is redacted and replaced with the new text. Surrounding words on the same line before and after the selection remain untouched and visible.
-- **Click-to-Edit Mode**:
-  - Toggle **✎ Edit Mode** on the toolbar or press **Ctrl+E** (or hold **Alt** while clicking). The cursor changes to a pencil.
-  - Click **anywhere** on the page:
-    - If you click on any text line, an edit dialog opens pre-filled with that line's text, typography, and color for in-place editing.
-    - If you click on an image, the image management dialog opens to replace or remove it.
-    - If you click on a table, the spreadsheet-like table editor opens.
-    - If you click on empty space, a popup prompts to insert a new text box, image, or table at that exact coordinate.
-- **Text editing and replacement**:
-  - Right-click anywhere on a page and select **+ Insert Text Box Here…** (or press **Ctrl+T**) to add floating text boxes with custom typography and coordinates.
-  - Select text and choose **✂ Delete (Redact) Selected Text** to redact sensitive or obsolete content with a clean background fill.
-- **Image insertion and management**:
-  - Right-click anywhere on a page or click **Image** (**Ctrl+I**) to insert images (*PNG*, *JPEG*, *WEBP*, *BMP*, *ICO*) with customizable position and dimensions. Images are normalized automatically through Pillow.
-  - Right-click and choose **Manage Images on Page…** to view all embedded images, replace an existing image with a new file, or delete it from the page.
-- **Table insertion and editing**:
-  - Right-click and choose **📊 Insert Table Here…** (or click **Table**) to draw a clean structured table.
-  - Choose **Edit Tables on Page…** to automatically detect tables via PyMuPDF layout analysis, then edit cell text in an interactive spreadsheet grid dialog, add/remove rows and columns, and adjust table dimensions.
-- **Atomic in-place saving & Save As**:
-  - Press **Ctrl+S** or click **Save** on the toolbar to save all edits directly to the open PDF file. PyMuPDF saves through an atomic replacement mechanism that prevents file corruption.
-  - Press **Ctrl+Shift+S** or choose **File > Save As…** to export a copy under a new filename.
+Mouse or touch dragging pans the document in both Read and Edit modes. The
+wheel, arrow keys, Page Up/Down, and page controls remain available. While typing,
+arrows move the text cursor. Select Text mode remains available for copying and
+editing a specific selection.
 
-## Hand-drawn signature
+### Figures and signatures
 
-1. Open a PDF and jump to the page where the signature belongs.
-2. Click **Sign** (or **Tools > Hand-drawn Signature…**).
-3. Draw on the white signature pad. Choose a placed size and click
-   **Place Signature**.
-4. Click once on the page to position the signature. Right-click or press
-   **Esc** to cancel placement.
-5. Press **Ctrl+S** to save the changes in place, or **Ctrl+Shift+S** to save a copy.
+1. Use **Insert > Figure / Image** (or **Ctrl+I**) to choose an image. Use
+   **Insert > Signature** to draw a signature on the signature pad. Both commands
+   activate Edit Mode.
+2. Click anywhere inside a page to place the figure or signature.
+3. Drag a placed object to move it. You can move it to another page; dragging at
+   the viewport edge scrolls the document. You can also navigate to another page
+   before placing an object. Multiple unsaved objects remain movable.
+4. Press **Ctrl+S** or use **Save As** to save. Saved figures and signatures become
+   fixed page content and cannot be dragged again in PDF Lite. A failed or
+   cancelled save keeps the placed objects movable.
 
-The signature is stored as a visible **ink annotation** in the PDF. It can be
-moved or deleted later by PDF annotation editors. It is **not** a
-cryptographic/digital signature and does not prove identity or document
-integrity. For a legally binding digital signature, use a certificate-based
-workflow in Acrobat or a dedicated e-signature service.
+**Esc** or right-click cancels an object awaiting placement. Read Mode allows
+navigation without moving unsaved objects. Switching back to Edit Mode lets you
+move those objects until you save.
+
+The hand-drawn signature is a visible drawing, not a certificate-based digital
+signature. This workflow does not verify identity or document integrity.
+
+The Edit and context menus also retain explicit image replacement, table
+editing, and redaction commands. In-place saving uses atomic replacement;
+**Ctrl+Shift+S** saves a copy under a new filename.
 
 ## PDF to Word
 
@@ -145,11 +137,11 @@ To cleanly remove the registration later, run [`unregister.bat`](file:///C:/User
 | `Ctrl+S` | Save PDF changes in place |
 | `Ctrl+Shift+S` | Save As (new copy) |
 | `Ctrl+1` | Read Mode (touch screen / pan browsing) |
-| `Ctrl+2` | Select Mode (text selection & quick popup menu) |
-| `Ctrl+E` | Toggle Click-to-Edit mode |
-| `Alt+Click` | Click anywhere on document to edit element |
-| `Ctrl+T` | Add text box |
-| `Ctrl+I` | Insert image |
+| `Ctrl+2` | Select Text mode |
+| `Ctrl+E` | Toggle Edit Mode (double-click to type inline) |
+| Double-click in Edit Mode | Add text or edit an existing text line inline |
+| `Ctrl+T` | Enter Edit Mode, then double-click a text position |
+| `Ctrl+I` | Choose a figure, then click a page position |
 | `Ctrl+Shift+E` | Convert PDF to Word |
 | `Ctrl+W` | Close the document |
 | `Ctrl+F` | Find text |
@@ -206,7 +198,7 @@ Pillow 12.3, python-docx, and LibreOffice 26.2.1.2.
 - Editable-reflow Word output approximates formatting; complex multi-column
   layouts, tables and images will not survive perfectly.
 - The reader renders pages as images, so very high zoom uses more memory.
-- Ink signatures are annotations, not cryptographic signatures.
+- Hand-drawn signatures are flattened drawings after saving, not cryptographic signatures.
 
 ## Security controls & hardening
 

@@ -13,11 +13,12 @@ from PIL import Image, ImageTk
 
 from .core import (
     BASE_SCALE,
+    INK_SIGNATURE_BORDER_WIDTH,
+    INK_SIGNATURE_STROKE_COLOR,
     PdfDocument,
     build_signature_strokes_from_template,
-    signature_template_from_vertices,
 )
-from .editor import get_element_at_point
+from .editor import apply_inline_text, get_element_at_point
 
 
 class PageRender(tk.Frame):
@@ -71,12 +72,11 @@ class ContinuousView(tk.Frame):
         self._sel_dragged = False
         self._press_point: tuple[float, float] | None = None
         self._context_menu: tk.Menu | None = None
-        self._placing_signature = False
-        self._signature_strokes: list[list[tuple[float, float]]] = []
-        self._signature_ratio = 1.0
-        self._signature_width = 180.0
-        self._signature_adjust: dict | None = None
-        self._signature_drag: tuple[float, float] | None = None
+        self._pending_objects = []
+        self._placing_object = None
+        self._object_drag = None
+        self._active_object = None
+        self._inline = None
         self.mode = MODE_READ
         self.edit_mode = False
         self._pan_origin: tuple[int, int] | None = None
@@ -112,6 +112,9 @@ class ContinuousView(tk.Frame):
     # Document lifecycle
     # ------------------------------------------------------------------
     def set_document(self, doc: PdfDocument, initial_fit: str | None = "width") -> None:
+        self.cancel_inline_text()
+        self._pending_objects.clear()
+        self._active_object = None
         self.doc = doc
         self.fit_mode = initial_fit
         self.zoom = 1.0
@@ -122,7 +125,7 @@ class ContinuousView(tk.Frame):
         self.search_hits = {}
         self.current_hit = None
         self._last_page = -1
-        self.cancel_signature_placement(silent=True)
+        self.cancel_object_placement(silent=True)
         self.clear_selection()
         self._last_canvas_size = (0, 0)
         self.update_idletasks()
@@ -141,8 +144,10 @@ class ContinuousView(tk.Frame):
         self.search_hits = {}
         self.current_hit = None
         self._last_page = -1
-        self.cancel_signature_placement(silent=True)
-        self.finish_signature_adjust(silent=True)
+        self.cancel_object_placement(silent=True)
+        self.cancel_inline_text()
+        self._pending_objects.clear()
+        self._active_object = None
         self.clear_selection()
         self.canvas.delete("all")
         self.canvas.configure(scrollregion=(0, 0, 0, 0))
@@ -425,6 +430,8 @@ class ContinuousView(tk.Frame):
                                     text=f"Page {number + 1}\nrendering…",
                                     font=("Segoe UI", 9), fill="#9ba0a8",
                                     tags=("page", f"ph{number}", f"p{number}"))
+        self._draw_drafts()
+        self._position_inline()
         self._schedule_render()
 
     def _visible_pages(self, preload: bool = True) -> list[int]:
@@ -484,7 +491,7 @@ class ContinuousView(tk.Frame):
                 # differences can happen when a crop box is unusual.
                 if abs(image.width - item["w"]) > 2 or abs(image.height - item["h"]) > 2:
                     image = image.resize((item["w"], item["h"]), Image.Resampling.BILINEAR)
-            photo = ImageTk.PhotoImage(image=image)
+            photo = ImageTk.PhotoImage(image=image, master=self.canvas)
             nbytes = image.width * image.height * 4 * 2
             entry = {"photo": photo, "image": image, "bytes": nbytes}
             key = self._cache_key(number)
@@ -514,6 +521,8 @@ class ContinuousView(tk.Frame):
                                  image=entry["photo"],
                                  tags=("image", f"img{number}", f"p{number}"))
         self._draw_overlays(number)
+        self.canvas.tag_raise("draft")
+        self.canvas.tag_raise("inline")
 
     # ------------------------------------------------------------------
     # Coordinate mapping
@@ -524,6 +533,7 @@ class ContinuousView(tk.Frame):
             return (0.0, 0.0, 0.0, 0.0)
         item = self.layout[number]
         page_rect = self.doc.page(number).rect
+        rect = fitz.Rect(rect) * self.doc.page(number).rotation_matrix
         sx, sy = item["sx"], item["sy"]
         x0 = (rect[0] - page_rect.x0) * sx
         y0 = (rect[1] - page_rect.y0) * sy
@@ -554,6 +564,8 @@ class ContinuousView(tk.Frame):
         item = self.layout[number]
         nx = x - item["x"]
         ny = y - item["y"]
+        if not (0 <= nx <= item["w"] and 0 <= ny <= item["h"]):
+            return None
         base_w, base_h = item["base_w"], item["base_h"]
         rotation = self.view_rotation % 360
         if rotation == 90:
@@ -565,7 +577,9 @@ class ContinuousView(tk.Frame):
         else:
             bx, by = nx, ny
         page_rect = self.doc.page(number).rect
-        return page_rect.x0 + bx / item["sx"], page_rect.y0 + by / item["sy"]
+        point = fitz.Point(page_rect.x0 + bx / item["sx"], page_rect.y0 + by / item["sy"])
+        point = point * self.doc.page(number).derotation_matrix
+        return point.x, point.y
 
     @staticmethod
     def _intersects(a: tuple, b: tuple) -> bool:
@@ -630,11 +644,18 @@ class ContinuousView(tk.Frame):
     def set_mode(self, mode: str) -> None:
         if mode not in (MODE_READ, MODE_SELECT, MODE_EDIT):
             raise ValueError(f"Unknown mode: {mode}")
+        if not self.commit_inline_text():
+            return False
+        self.cancel_object_placement(silent=True)
+        self._object_drag = None
+        self._active_object = None
         self.mode = mode
         self.edit_mode = (mode == MODE_EDIT)
         if mode != MODE_SELECT:
             self.clear_selection()
+        self._draw_drafts()
         self._update_cursor()
+        return True
 
     def set_edit_mode(self, enabled: bool) -> None:
         self.set_mode(MODE_EDIT if enabled else MODE_READ)
@@ -643,10 +664,8 @@ class ContinuousView(tk.Frame):
         if self.doc is None:
             self.canvas.configure(cursor="")
             return
-        if self._placing_signature:
+        if self._placing_object is not None:
             self.canvas.configure(cursor="crosshair")
-        elif self._signature_adjust is not None:
-            self.canvas.configure(cursor="hand2")
         elif self.mode == MODE_EDIT:
             self.canvas.configure(cursor="pencil")
         elif self.mode == MODE_SELECT:
@@ -657,63 +676,29 @@ class ContinuousView(tk.Frame):
     def _on_button_press(self, event) -> None:
         if self.doc is None or not self.layout:
             return
-        if self._signature_adjust is not None:
-            page = self._page_at_canvas_y(event.y)
-            if page is None:
-                return
-            ax = self.canvas.canvasx(event.x)
-            ay = self.canvas.canvasy(event.y)
-            point = self._screen_to_page(page, ax, ay)
-            if point is None:
-                return
-            if page != self._signature_adjust["page"]:
-                self._relocate_signature_to_point(page, point)
-                return
-            adj = self._signature_adjust
-            box = (adj["anchor_x"], adj["anchor_y"],
-                   adj["anchor_x"] + adj["width"], adj["anchor_y"] + adj["height"])
-            px, py = point
-            if box[0] <= px <= box[2] and box[1] <= py <= box[3]:
-                self._signature_drag = (px - adj["anchor_x"], py - adj["anchor_y"])
-            else:
-                self._relocate_signature_to_point(page, point)
-            self.canvas.focus_set()
+        if not self.commit_inline_text():
             return
-        if self._placing_signature:
-            page = self._page_at_canvas_y(event.y)
-            if page is None:
-                self.app.set_status("Click inside a page to place the signature")
-                return
-            x = self.canvas.canvasx(event.x)
-            y = self.canvas.canvasy(event.y)
-            self._place_signature_at(page, x, y)
-            return
-
-        # Direct Click-to-Edit Mode or Alt+Click:
-        # User clicks anywhere in the PDF document to edit text, table, image, or insert content
-        if self.mode == MODE_EDIT or (event.state & 0x0008):
-            self.clear_selection()
-            self.canvas.focus_set()
-            page = self._page_at_canvas_y(event.y)
-            if page is None:
-                return
-            ax = self.canvas.canvasx(event.x)
-            ay = self.canvas.canvasy(event.y)
-            point = self._screen_to_page(page, ax, ay)
+        self.canvas.focus_set()
+        page, point = self._event_page_point(event)
+        if self.mode == MODE_EDIT and self._placing_object is not None:
             if point is not None:
-                xref = self.doc.ink_signature_at_point(page, point)
-                if xref is not None:
-                    self._select_signature_for_adjust(page, xref)
+                self._place_object(page, point)
+            return
+        if self.mode == MODE_EDIT and point is not None:
+            for item in reversed(self._pending_objects):
+                r = item["rect"]
+                if item["page"] == page and r[0] <= point[0] <= r[2] and r[1] <= point[1] <= r[3]:
+                    self._active_object = item
+                    self._object_drag = (point[0] - r[0], point[1] - r[1])
+                    self._draw_drafts()
                     return
-                self.app.handle_click_to_edit(page, point)
-                return
-
-        # Read Mode: touch screen finger browsing or mouse drag pan
-        if self.mode == MODE_READ:
+        self._active_object = None
+        self._draw_drafts()
+        # A single touch/drag navigates in both modes. Only a double-click edits.
+        if self.mode in (MODE_READ, MODE_EDIT):
             self._pan_origin = (event.x, event.y)
             self._sel_dragged = False
             self.canvas.scan_mark(event.x, event.y)
-            self.canvas.focus_set()
             return
 
         # Select Mode: mouse / stylus drag text selection
@@ -732,27 +717,27 @@ class ContinuousView(tk.Frame):
         self.canvas.configure(cursor="xterm")
 
     def _on_drag(self, event) -> None:
-        if self._signature_drag is not None and self._signature_adjust is not None:
-            page = self._page_at_canvas_y(event.y)
-            if page is None or page != self._signature_adjust["page"]:
-                return
-            ax = self.canvas.canvasx(event.x)
-            ay = self.canvas.canvasy(event.y)
-            point = self._screen_to_page(page, ax, ay)
-            if point is None:
-                return
-            off_x, off_y = self._signature_drag
-            self._set_signature_anchor(point[0] - off_x, point[1] - off_y, page)
-            self._commit_signature_position()
+        if self._object_drag is not None and self._active_object is not None and self.mode == MODE_EDIT:
+            # Auto-scroll at the viewport edge so a drag can cross page boundaries.
+            if event.y < 28:
+                self.canvas.yview_scroll(-1, "units")
+                self._after_scroll()
+            elif event.y > self.canvas.winfo_height() - 28:
+                self.canvas.yview_scroll(1, "units")
+                self._after_scroll()
+            page, point = self._event_page_point(event)
+            if point is not None:
+                self.move_object(self._active_object, page,
+                                 (point[0] - self._object_drag[0], point[1] - self._object_drag[1]))
             return
-        if self.mode == MODE_READ:
+        if self.mode in (MODE_READ, MODE_EDIT):
             if self._pan_origin is not None:
                 dx = abs(event.x - self._pan_origin[0])
                 dy = abs(event.y - self._pan_origin[1])
                 if dx > 3 or dy > 3:
                     self._sel_dragged = True
-            self.canvas.scan_dragto(event.x, event.y, gain=1)
-            self._after_scroll()
+                self.canvas.scan_dragto(event.x, event.y, gain=1)
+                self._after_scroll()
             return
 
         if self.mode != MODE_SELECT:
@@ -805,17 +790,15 @@ class ContinuousView(tk.Frame):
         self.selection_text = "\n".join(chunks).strip()
 
     def _on_button_release(self, event) -> None:
-        if self._signature_drag is not None:
-            self._signature_drag = None
+        if self._object_drag is not None:
+            self._object_drag = None
             self._update_cursor()
             return
-        if self.mode == MODE_READ:
-            if not self._sel_dragged and self._pan_origin is not None:
-                page = self._page_at_canvas_y(event.y)
-                if page is not None:
-                    ax = self.canvas.canvasx(event.x)
-                    ay = self.canvas.canvasy(event.y)
-                    self._open_link_at(page, ax, ay)
+        if self.mode in (MODE_READ, MODE_EDIT):
+            if self.mode == MODE_READ and not self._sel_dragged and self._pan_origin is not None:
+                page, point = self._event_page_point(event)
+                if point is not None:
+                    self._open_link_at(page, self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
             self._pan_origin = None
             self._update_cursor()
             return
@@ -868,11 +851,15 @@ class ContinuousView(tk.Frame):
     def _on_double_click(self, event) -> None:
         if self.doc is None:
             return
-        if self.mode == MODE_READ:
+        self._pan_origin = None
+        if self.mode == MODE_READ or self._placing_object is not None:
             return
-        page = self._page_at_canvas_y(event.y)
-        if page is None:
+        page, point = self._event_page_point(event)
+        if point is None:
             return
+        if self.mode == MODE_EDIT:
+            self.begin_inline_text(page, point)
+            return "break"
         ax = self.canvas.canvasx(event.x)
         ay = self.canvas.canvasy(event.y)
         words = self.doc.words(page)
@@ -978,7 +965,7 @@ class ContinuousView(tk.Frame):
         if self.doc is None:
             self.canvas.configure(cursor="")
             return
-        if self._placing_signature:
+        if self._placing_object is not None:
             self.canvas.configure(cursor="crosshair")
             return
         if self.mode == MODE_EDIT:
@@ -1073,28 +1060,8 @@ class ContinuousView(tk.Frame):
     def _on_context_menu(self, event) -> None:
         if self.doc is None:
             return
-        if self._placing_signature:
-            page = self._page_at_canvas_y(event.y)
-            if page is None:
-                return
-            menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="Cancel Signature Placement",
-                             command=self.cancel_signature_placement)
-            try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
-            return
-        if self._signature_adjust is not None:
-            menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="Finish Moving Signature",
-                             command=self.finish_signature_adjust)
-            menu.add_command(label="Cancel Signature Move",
-                             command=self.finish_signature_adjust)
-            try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
+        if self._placing_object is not None:
+            self.cancel_object_placement()
             return
         page = self._page_at_canvas_y(event.y)
         if page is None:
@@ -1117,13 +1084,13 @@ class ContinuousView(tk.Frame):
         elif elem.get("type") == "image":
             menu.add_command(
                 label="🖼 Edit / Replace Clicked Image…",
-                command=lambda: self.app.handle_click_to_edit(page, page_coords),
+                command=lambda: self.app.manage_images(page),
             )
             menu.add_separator()
         elif elem.get("type") == "table":
             menu.add_command(
                 label="📊 Edit Clicked Table…",
-                command=lambda: self.app.handle_click_to_edit(page, page_coords),
+                command=lambda: self.app.edit_tables_on_page(page),
             )
             menu.add_separator()
 
@@ -1146,7 +1113,7 @@ class ContinuousView(tk.Frame):
         menu.add_command(label="✋ Read Mode (Touch / Pan)", command=self.app.set_read_mode, accelerator="Ctrl+1")
         menu.add_command(label="I Select Mode (Text Selection)", command=self.app.set_select_mode, accelerator="Ctrl+2")
         if hasattr(self.app, "edit_mode_var") and self.app.edit_mode_var is not None:
-            menu.add_checkbutton(label="✎ Click-to-Edit Mode", variable=self.app.edit_mode_var,
+            menu.add_checkbutton(label="✎ Edit Mode (double-click to type)", variable=self.app.edit_mode_var,
                                  command=self.app.toggle_edit_mode, accelerator="Ctrl+E")
         menu.add_separator()
 
@@ -1174,199 +1141,225 @@ class ContinuousView(tk.Frame):
             menu.grab_release()
 
     # ------------------------------------------------------------------
-    # Hand-drawn signature placement
+    # Inline text and unsaved movable figures/signatures
     # ------------------------------------------------------------------
-    def begin_signature_placement(self, strokes: list[list[tuple[float, float]]],
-                                  ratio: float, width_pt: float) -> None:
-        self.finish_signature_adjust(silent=True)
-        self._signature_strokes = strokes
-        self._signature_ratio = max(0.05, min(2.0, ratio))
-        self._signature_width = max(40.0, min(300.0, width_pt))
-        self._placing_signature = True
-        self.clear_selection()
-        self.canvas.configure(cursor="crosshair")
-        self.app.set_status(
-            "Click on a page to place the signature. Esc or right-click cancels.", 15000)
+    def _event_page_point(self, event):
+        page = self._page_at_canvas_y(event.y)
+        if page is None:
+            return None, None
+        return page, self._screen_to_page(page, self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
 
-    def cancel_signature_placement(self, silent: bool = False) -> None:
-        if not self._placing_signature:
+    def begin_inline_text(self, page, point, *, new=False, element=None):
+        if self.doc is None or not self.commit_inline_text():
             return
-        self._placing_signature = False
-        self._signature_strokes = []
-        self.canvas.configure(cursor="")
-        if not silent:
-            self.app.set_status("Signature placement cancelled")
+        self.app.set_mode(MODE_EDIT)
+        self.set_mode(MODE_EDIT)
+        # Inspect text directly, including text inside tables and over images.
+        elem = element
+        if elem is None and not new:
+            for block in self.doc.page(page).get_text("dict").get("blocks", []):
+                for line in block.get("lines", []):
+                    r = fitz.Rect(line["bbox"])
+                    if r.contains(fitz.Point(point)):
+                        from .editor import get_text_properties_at_rect
+                        props = get_text_properties_at_rect(self.doc, page, tuple(r))
+                        elem = dict(props, text="".join(span["text"] for span in line["spans"]), bbox=tuple(r))
+                        break
+                if elem is not None:
+                    break
+        elem = elem or {}
+        pdf_page = self.doc.page(page)
+        bounds = pdf_page.rect * pdf_page.derotation_matrix
+        x, y = elem.get("bbox", (*point, *point))[:2]
+        size = elem.get("fontsize", 11.0)
+        # Leave enough room for several lines, while keeping the insertion point exact.
+        rect = (x, y, bounds.x1, min(bounds.y1, y + max(size * 5, 70)))
+        widget = tk.Text(self.canvas, wrap="word", undo=True, bd=1, relief="solid",
+                         highlightthickness=1, highlightbackground="#2878c8", padx=0, pady=0,
+                         background="white", foreground="#000000", insertbackground="#000000")
+        original = elem.get("text", "")
+        widget.insert("1.0", original)
+        self._inline = dict(widget=widget, page=page, rect=rect, original_rect=elem.get("bbox"),
+                            original=original, fontname=elem.get("fontname", "helv"),
+                            fontsize=size, color=elem.get("color", (0, 0, 0)))
+        widget.bind("<Control-Return>", lambda _e: self._finish_inline_key())
+        widget.bind("<Escape>", lambda _e: self._cancel_inline_key())
+        widget.bind("<<Modified>>", self._inline_changed)
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        widget.bind("<Control-s>", lambda _e: self._save_inline_key())
+        self._position_inline()
+        widget.focus_set()
+        widget.mark_set("insert", "end-1c")
+        self.app.set_status("Type directly on the page. Click outside or Ctrl+Enter to apply; Esc cancels; Ctrl+S saves.", 12000)
 
-    def _signature_box_at_point(
-        self,
-        number: int,
-        point: tuple[float, float],
-        template_strokes: list[list[tuple[float, float]]],
-        ratio: float,
-        width_pt: float,
-    ) -> tuple[float, float, float, float]:
-        page_rect = self.doc.page(number).rect
-        margin = 6.0
-        width = min(width_pt, max(40.0, page_rect.width * 0.5))
-        height = max(20.0, width * ratio)
-        if width + 2 * margin > page_rect.width:
-            width = max(20.0, page_rect.width - 2 * margin)
-            height = max(10.0, width * ratio)
-        if height + 2 * margin > page_rect.height:
-            height = max(10.0, page_rect.height - 2 * margin)
-            width = max(10.0, height / max(0.05, ratio))
-        px, py = point
-        start_x = max(page_rect.x0 + margin,
-                      min(px, page_rect.x1 - width - margin))
-        start_y = max(page_rect.y0 + margin,
-                      min(py, page_rect.y1 - height - margin))
-        return start_x, start_y, width, height
+    def inline_has_changes(self):
+        return (self._inline is not None and
+                self._inline["widget"].get("1.0", "end-1c") != self._inline["original"])
 
-    def _set_signature_anchor(
-        self,
-        anchor_x: float,
-        anchor_y: float,
-        page_num: int,
-    ) -> None:
-        if self._signature_adjust is None or self.doc is None:
+    def _inline_changed(self, _event=None):
+        if self._inline is not None:
+            widget = self._inline["widget"]
+            if widget.edit_modified():
+                self.app._refresh_title()
+                widget.edit_modified(False)
+
+    def _position_inline(self):
+        if self._inline is None:
             return
-        adj = self._signature_adjust
-        ratio = adj["ratio"]
-        page_rect = self.doc.page(page_num).rect
-        margin = 6.0
-        width = adj["width"]
-        height = adj["height"]
-        start_x = max(page_rect.x0 + margin,
-                      min(anchor_x, page_rect.x1 - width - margin))
-        start_y = max(page_rect.y0 + margin,
-                      min(anchor_y, page_rect.y1 - height - margin))
-        adj["anchor_x"] = start_x
-        adj["anchor_y"] = start_y
-        adj["page"] = page_num
+        item = self._inline
+        mapped = self._map_rect(item["page"], item["rect"])
+        widget = item["widget"]
+        family = "Courier New" if item["fontname"].startswith("co") else "Times New Roman" if item["fontname"] in ("times", "tibo", "tiit") else "Arial"
+        weight = "bold" if item["fontname"] in ("hebo", "tibo", "cobo") else "normal"
+        widget.configure(font=(family, -max(5, round(item["fontsize"] * BASE_SCALE * self.zoom)), weight),
+                         foreground="#" + "".join(f"{round(c * 255):02x}" for c in item["color"]))
+        self.canvas.delete("inline")
+        self.canvas.create_window(mapped[0], mapped[1], anchor="nw", window=widget,
+                                  width=max(12, mapped[2] - mapped[0]), height=max(18, mapped[3] - mapped[1]), tags="inline")
 
-    def _begin_signature_adjust(
-        self,
-        number: int,
-        xref: int,
-        template_strokes: list[list[tuple[float, float]]],
-        ratio: float,
-        width_pt: float,
-        anchor_x: float,
-        anchor_y: float,
-        width: float,
-        height: float,
-    ) -> None:
-        self._signature_adjust = {
-            "page": number,
-            "xref": xref,
-            "template": template_strokes,
-            "ratio": ratio,
-            "width_pt": width_pt,
-            "anchor_x": anchor_x,
-            "anchor_y": anchor_y,
-            "width": width,
-            "height": height,
-        }
-        self._signature_drag = None
+    def _finish_inline_key(self):
+        self.commit_inline_text()
+        return "break"
+
+    def _cancel_inline_key(self):
+        self.cancel_inline_text()
+        self.canvas.focus_set()
+        return "break"
+
+    def _save_inline_key(self):
+        self.app.save_document()
+        return "break"
+
+    def cancel_inline_text(self):
+        if self._inline is not None:
+            self._inline["widget"].destroy()
+            self._inline = None
+            self.canvas.delete("inline")
+            self.app._refresh_title()
+
+    def commit_inline_text(self):
+        if self._inline is None:
+            return True
+        item = self._inline
+        text = item["widget"].get("1.0", "end-1c")
+        if text != item["original"]:
+            try:
+                apply_inline_text(self.doc, item["page"], item["rect"], text,
+                                  original_rect=item["original_rect"], fontname=item["fontname"],
+                                  fontsize=item["fontsize"], text_color=item["color"])
+            except Exception as exc:
+                self.app.set_status(str(exc), 10000)
+                item["widget"].focus_set()
+                return False
+            self._invalidate_page(item["page"])
+            self.app.thumbnails.invalidate_page(item["page"])
+            self.app.mark_modified()
+        self.cancel_inline_text()
+        self.canvas.focus_set()
+        return True
+
+    def begin_image_placement(self, image):
+        self._begin_object_placement(dict(kind="image", image=image))
+
+    def begin_signature_placement(self, strokes, ratio, width_pt):
+        self._begin_object_placement(dict(kind="signature", strokes=strokes,
+                                          ratio=ratio, width=width_pt))
+
+    def _begin_object_placement(self, item):
+        if not self.commit_inline_text():
+            return
+        self.app.set_mode(MODE_EDIT)
+        self.set_mode(MODE_EDIT)
+        self._placing_object = item
         self._update_cursor()
+        self.canvas.focus_set()
+        self.app.set_status("Click anywhere on a page to place it, then drag to move. Save fixes its position. Esc cancels placement.", 15000)
 
-    def finish_signature_adjust(self, silent: bool = False) -> None:
-        if self._signature_adjust is None:
-            return
-        self._signature_adjust = None
-        self._signature_drag = None
+    def cancel_object_placement(self, silent=False):
+        self._placing_object = None
+        self._object_drag = None
         self._update_cursor()
         if not silent:
-            self.app.set_status(
-                "Signature position set — drag again in Edit mode or press Ctrl+S to save",
-                7000,
-            )
+            self.app.set_status("Placement cancelled")
 
-    def _commit_signature_position(self) -> None:
-        if self.doc is None or self._signature_adjust is None:
-            return
-        adj = self._signature_adjust
-        strokes = build_signature_strokes_from_template(
-            adj["template"],
-            adj["anchor_x"],
-            adj["anchor_y"],
-            adj["width"],
-            adj["height"],
-        )
-        if not strokes:
-            return
-        try:
-            adj["xref"] = self.doc.replace_ink_signature(adj["page"], adj["xref"], strokes)
-        except Exception as exc:
-            self.app.set_status(f"Could not move signature: {exc}")
-            return
-        self._invalidate_page(adj["page"])
+    def cancel_signature_placement(self, silent=False):
+        self.cancel_object_placement(silent)
+
+    def _place_object(self, page, point):
+        item = self._placing_object
+        pdf_page = self.doc.page(page)
+        bounds = pdf_page.rect * pdf_page.derotation_matrix
+        if item["kind"] == "image":
+            width = min(180.0, bounds.width * .6)
+            height = width * item["image"].height / item["image"].width
+        else:
+            width = item["width"]
+            height = max(10, width * item["ratio"])
+        factor = min(1, bounds.width / width, bounds.height / height)
+        width, height = width * factor, height * factor
+        item["rect"] = (0, 0, width, height)
+        item["page"] = page
+        self._pending_objects.append(item)
+        self._placing_object = None
+        self._active_object = item
+        self.move_object(item, page, point)
         self.app.mark_modified()
+        self._update_cursor()
+        self.app.set_status("Drag to move this figure or signature, including to another page. Save fixes all placed objects.", 12000)
 
-    def _relocate_signature_to_point(self, page: int, point: tuple[float, float]) -> None:
-        if self.doc is None or self._signature_adjust is None:
+    def move_object(self, item, page, point):
+        if self.mode != MODE_EDIT or not any(obj is item for obj in self._pending_objects):
             return
-        adj = self._signature_adjust
-        start_x, start_y, width, height = self._signature_box_at_point(
-            page, point, adj["template"], adj["ratio"], adj["width_pt"])
-        adj["width"] = width
-        adj["height"] = height
-        self._set_signature_anchor(start_x, start_y, page)
-        self._commit_signature_position()
+        pdf_page = self.doc.page(page)
+        bounds = pdf_page.rect * pdf_page.derotation_matrix
+        r = item["rect"]
+        width, height = r[2] - r[0], r[3] - r[1]
+        factor = min(1, bounds.width / width, bounds.height / height)
+        width, height = width * factor, height * factor
+        x = max(bounds.x0, min(point[0], bounds.x1 - width))
+        y = max(bounds.y0, min(point[1], bounds.y1 - height))
+        item.update(page=page, rect=(x, y, x + width, y + height))
+        self._draw_drafts()
 
-    def _select_signature_for_adjust(self, page: int, xref: int) -> None:
+    def _draw_drafts(self):
+        self.canvas.delete("draft")
         if self.doc is None:
             return
-        try:
-            vertices = self.doc.ink_signature_vertices(page, xref)
-            template, ax, ay, width, height = signature_template_from_vertices(vertices)
-        except Exception as exc:
-            self.app.set_status(f"Could not select signature: {exc}")
-            return
-        ratio = height / max(width, 1.0)
-        self._begin_signature_adjust(
-            page, xref, template, ratio, width,
-            ax, ay, width, height,
-        )
-        self.app.set_status(
-            f"Drag the signature to move it on page {page + 1}. Esc when done.",
-            10000,
-        )
+        for item in self._pending_objects:
+            rect = self._map_rect(item["page"], item["rect"])
+            if item["kind"] == "image":
+                image = item["image"]
+                rotation = (self.doc.page(item["page"]).rotation + self.view_rotation) % 360
+                if rotation:
+                    image = image.rotate(-rotation, expand=True)
+                size = (max(1, round(rect[2]-rect[0])), max(1, round(rect[3]-rect[1])))
+                key = (size, rotation)
+                if item.get("photo_key") != key:
+                    item["photo"] = ImageTk.PhotoImage(image.resize(size, Image.Resampling.LANCZOS), master=self.canvas)
+                    item["photo_key"] = key
+                self.canvas.create_image(rect[0], rect[1], anchor="nw", image=item["photo"], tags="draft")
+            else:
+                r = item["rect"]
+                strokes = build_signature_strokes_from_template(item["strokes"], r[0], r[1], r[2]-r[0], r[3]-r[1])
+                for stroke in strokes:
+                    points = []
+                    for x, y in stroke:
+                        mapped = self._map_rect(item["page"], (x, y, x, y))
+                        points.extend(mapped[:2])
+                    if len(points) >= 4:
+                        self.canvas.create_line(*points, fill="#" + "".join(f"{round(c * 255):02x}" for c in INK_SIGNATURE_STROKE_COLOR),
+                                                width=max(1, BASE_SCALE * self.zoom * INK_SIGNATURE_BORDER_WIDTH), tags="draft")
+            if self.mode == MODE_EDIT:
+                self.canvas.create_rectangle(*rect, outline="#2878c8", dash=(4, 3),
+                                             width=2 if item is self._active_object else 1, tags="draft")
+        self.canvas.tag_raise("inline")
 
-    def _place_signature_at(self, number: int, x: float, y: float) -> None:
-        if self.doc is None or not self._signature_strokes:
-            return
-        point = self._screen_to_page(number, x, y)
-        if point is None:
-            return
-        template = self._signature_strokes
-        ratio = self._signature_ratio
-        width_pt = self._signature_width
-        start_x, start_y, width, height = self._signature_box_at_point(
-            number, point, template, ratio, width_pt)
-        pdf_strokes = build_signature_strokes_from_template(
-            template, start_x, start_y, width, height)
-        if not pdf_strokes:
-            self.app.set_status("Signature is too small to place")
-            return
-        try:
-            xref = self.doc.add_ink_signature(number, pdf_strokes)
-        except Exception as exc:
-            self.app.set_status(f"Could not add signature: {exc}")
-            return
-        self._placing_signature = False
-        self._signature_strokes = []
-        self._begin_signature_adjust(
-            number, xref, template, ratio, width_pt,
-            start_x, start_y, width, height,
-        )
-        self._invalidate_page(number)
-        self.app.mark_modified()
-        self.app.set_status(
-            f"Signature on page {number + 1} — drag to reposition, click elsewhere to move, "
-            "Esc when done, then Ctrl+S to save",
-            12000,
-        )
+    def placements_saved(self):
+        self._pending_objects.clear()
+        self._active_object = None
+        self._object_drag = None
+        self.cancel_object_placement(silent=True)
+        self.canvas.delete("draft")
 
     def _invalidate_page(self, number: int) -> None:
         keys = [key for key in self._cache if key[0] == number]

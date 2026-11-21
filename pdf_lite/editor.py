@@ -243,6 +243,39 @@ def insert_text_in_pdf(
     return (target_r.x0, target_r.y0, target_r.x1, target_r.y1)
 
 
+def apply_inline_text(doc, page_num, rect, text, *, original_rect=None,
+                      fontname="helv", fontsize=11.0, text_color=(0, 0, 0)):
+    """Validate text fit before changing the page; preserve nearby artwork/text."""
+    page = doc.page(page_num)
+    rect = fitz.Rect(_validate_finite_rect(rect)) & (page.rect * page.derotation_matrix)
+    if rect.is_empty:
+        raise ValueError("Choose a position inside the page")
+    if text.strip():
+        with fitz.open() as probe:
+            page = probe.new_page(width=rect.width, height=rect.height)
+            rc = page.insert_textbox(page.rect, text, fontname=fontname,
+                                     fontsize=fontsize, color=text_color)
+            if rc < 0:
+                raise ValueError("Text does not fit here. Use fewer lines or choose a larger area.")
+    page = doc.page(page_num)
+    if original_rect is not None:
+        page.add_redact_annot(fitz.Rect(_validate_finite_rect(original_rect)), fill=False)
+        page.apply_redactions(images=0, graphics=0)
+    if text.strip():
+        page.insert_textbox(rect, text, fontname=fontname,
+                            fontsize=fontsize, color=text_color)
+    doc.invalidate_page_cache(page_num)
+
+
+def load_figure(image_path):
+    """Normalize an image once so drafts and saved figures use identical pixels."""
+    if str(image_path).startswith(("\\\\", "//")):
+        raise ValueError("Remote network (UNC) paths are blocked for security")
+    with Image.open(image_path) as source:
+        source.thumbnail((MAX_IMG_DIM, MAX_IMG_DIM), Image.Resampling.LANCZOS)
+        return source.convert("RGBA")
+
+
 def delete_content_rect(
     doc: "PdfDocument",
     page_num: int,
